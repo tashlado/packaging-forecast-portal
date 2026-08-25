@@ -1,0 +1,629 @@
+<!DOCTYPE html>
+<html>
+<head>
+<base target="_top">
+<meta charset="utf-8">
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+<link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
+<style>
+  body { background:#f6f7f9; font-size:14px; }
+  .navbar { background:#1a2b4a; }
+  .navbar .nav-link { color:#cdd7ea; cursor:pointer; }
+  .navbar .nav-link.active { color:#fff; font-weight:600; border-bottom:2px solid #6ea8fe; }
+  .card { border:none; box-shadow:0 1px 3px rgba(0,0,0,.08); }
+  table.table { background:#fff; font-size:13px; }
+  th { white-space:nowrap; }
+  .num { text-align:right; font-variant-numeric:tabular-nums; }
+  .skeleton { color:#999; padding:2rem; text-align:center; }
+  .badge-gap { background:#ffe9a8; color:#6b5200; }
+  .clickable { cursor:pointer; }
+  .mix-sum-ok { color:#198754; font-weight:600; }
+  .mix-sum-bad { color:#dc3545; font-weight:600; }
+  #saveIcon.saving { color:#ffd166 !important; animation:pulse 1.2s ease-in-out infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.5} }
+  .toast-container { z-index:2000; }
+  .table-filter { max-width:220px; display:inline-block; }
+  .comment-cell { max-width:260px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+</style>
+</head>
+<body>
+
+<nav class="navbar navbar-expand px-3">
+  <span class="navbar-brand text-white fw-bold">&#128230; Packaging Forecast</span>
+  <ul class="navbar-nav me-auto" id="navTabs"></ul>
+  <span id="saveStatus" class="me-3" title="All changes saved">
+    <i id="saveIcon" class="bi bi-check-circle-fill" style="color:#7ee787;font-size:16px;"></i>
+  </span>
+  <small class="text-white-50" id="navUser"></small>
+</nav>
+
+<div class="container-fluid py-3" id="main">
+  <div class="skeleton" id="bootMsg">Loading portal&hellip;</div>
+  <div id="unauth" class="d-none alert alert-warning m-4">
+    Your account (<span id="unauthEmail"></span>) is not in the Permissions tab.
+    Ask an Admin to add you, then reload.
+  </div>
+  <div id="tabRoot" class="d-none"></div>
+</div>
+
+<div class="toast-container position-fixed bottom-0 end-0 p-3" id="toasts"></div>
+<div id="modalRoot"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+/* ============================ state ============================ */
+const APP = {
+  user:null, ref:null, config:null,
+  rates:[], compMix:[], ccMix:[], fx:[], output:[], audit:[], completeness:null,
+  loadState:'loading', activeTab:'dashboard',
+  filters:{ rateBrand:'', rateGeo:'', rateSearch:'', outBrand:'', outGeo:'', outType:'' }
+};
+const TABS = [
+  {id:'dashboard', label:'Dashboard'},
+  {id:'rates',     label:'Rate Card'},
+  {id:'compmix',   label:'Component Mix'},
+  {id:'ccmix',     label:'Cold Chain'},
+  {id:'output',    label:'Output'},
+  {id:'dims',      label:'Dimensions', admin:true},
+  {id:'history',   label:'History', admin:true}
+];
+
+/* ====================== save indicator ====================== */
+let _inFlight = 0;
+function saveBegin(){ _inFlight++; setSaveIcon(); }
+function saveEnd(){ _inFlight=Math.max(0,_inFlight-1); setSaveIcon(); }
+function setSaveIcon(){
+  const i=document.getElementById('saveIcon'), s=document.getElementById('saveStatus');
+  if(_inFlight>0){ i.className='bi bi-arrow-clockwise saving'; s.title='Saving - please wait before closing'; }
+  else { i.className='bi bi-check-circle-fill'; i.style.color='#7ee787'; s.title='All changes saved'; }
+}
+window.addEventListener('beforeunload', e => { if(_inFlight>0){ e.preventDefault(); e.returnValue=''; } });
+
+/* run(fnName, args, onOk, onErr, isWrite) - wraps google.script.run */
+function run(fn, args, onOk, onErr, isWrite){
+  if(isWrite) saveBegin();
+  let chain = google.script.run
+    .withSuccessHandler(resp => { try{ if(onOk) onOk(resp); } finally{ if(isWrite) saveEnd(); } })
+    .withFailureHandler(err => { try{ if(onErr) onErr(err); else toast('Failed: '+err.message,'danger'); } finally{ if(isWrite) saveEnd(); } });
+  chain[fn].apply(chain, args||[]);
+}
+
+/* ============================ boot ============================ */
+window.onload = function(){
+  run('initApp', [], d => {
+    document.getElementById('bootMsg').classList.add('d-none');
+    if(!d.authorised){
+      document.getElementById('unauthEmail').textContent = d.email || '(unknown)';
+      document.getElementById('unauth').classList.remove('d-none');
+      return;
+    }
+    APP.user=d.user; APP.ref=d.ref; APP.config=d.config;
+    document.getElementById('navUser').textContent = d.user.portalName+' | '+d.user.role;
+    buildNav(); buildTabPanes();
+    document.getElementById('tabRoot').classList.remove('d-none');
+    switchTab('dashboard');
+    run('loadAllAppData', [], d2 => {
+      Object.assign(APP, {rates:d2.rates, compMix:d2.compMix, ccMix:d2.ccMix, fx:d2.fx,
+                          output:d2.output, completeness:d2.completeness, config:d2.config});
+      if(d2.audit) APP.audit=d2.audit;
+      APP.loadState='ready';
+      renderActive();
+    }, err => { APP.loadState='error'; renderActive(); toast('Load failed: '+err.message,'danger'); });
+  }, err => { document.getElementById('bootMsg').textContent='Failed to start: '+err.message; });
+};
+
+function isAdmin(){ return APP.user && APP.user.role==='Admin'; }
+function isEditor(){ return APP.user && (APP.user.role==='Editor'||APP.user.role==='Admin'); }
+
+function buildNav(){
+  const ul=document.getElementById('navTabs'); ul.innerHTML='';
+  TABS.forEach(t=>{
+    if(t.admin && !isAdmin()) return;
+    const li=document.createElement('li'); li.className='nav-item';
+    li.innerHTML='<a class="nav-link" data-tab="'+t.id+'">'+t.label+'</a>';
+    li.firstChild.onclick=()=>switchTab(t.id);
+    ul.appendChild(li);
+  });
+}
+function buildTabPanes(){
+  const root=document.getElementById('tabRoot');
+  root.innerHTML=TABS.map(t=>'<div class="tab-pane d-none" id="pane-'+t.id+'"></div>').join('');
+}
+function switchTab(tab){
+  APP.activeTab=tab;
+  document.querySelectorAll('#navTabs .nav-link').forEach(a=>a.classList.toggle('active',a.dataset.tab===tab));
+  document.querySelectorAll('.tab-pane').forEach(p=>p.classList.toggle('d-none',p.id!=='pane-'+tab));
+  renderActive();
+}
+function renderActive(){
+  const r={dashboard:renderDashboard, rates:renderRates, compmix:renderCompMix,
+           ccmix:renderCCMix, output:renderOutput, dims:renderDims, history:renderHistory};
+  (r[APP.activeTab]||function(){})();
+}
+function pane(id){ return document.getElementById('pane-'+id); }
+function notReady(id){
+  if(APP.loadState==='ready') return false;
+  pane(id).innerHTML='<div class="skeleton">'+(APP.loadState==='error'?'Failed to load - reload the page.':'Loading data&hellip;')+'</div>';
+  return true;
+}
+
+/* ======================= lookups & fmt ======================= */
+function hlById(id){ return APP.ref.highLevelIds.find(h=>String(h.High_Level_ID)===String(id)); }
+function compById(id){ return APP.ref.components.find(c=>String(c.Component_ID)===String(id)); }
+function lineById(id){ return APP.ref.lines.find(l=>String(l.Modelling_ID)===String(id)); }
+function hlLabel(h){ return h ? [h.Brand,h.Geo,h.Treatment_Type,h.WL_Detail].filter(x=>x&&x!=='*').join(' ') : '?'; }
+function lineLabel(mid){
+  const l=lineById(mid); if(!l) return 'Line '+mid;
+  const h=hlById(l.High_Level_ID), c=compById(l.Component_ID);
+  return hlLabel(h)+' - '+(c?c.Component:'?');
+}
+function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function num(v,dp){ return (v===''||v==null||isNaN(v)) ? '' : Number(v).toFixed(dp===undefined?4:dp); }
+function toast(msg,kind){
+  const el=document.createElement('div');
+  el.className='toast align-items-center text-bg-'+(kind||'success')+' border-0 show mb-2';
+  el.innerHTML='<div class="d-flex"><div class="toast-body">'+esc(msg)+'</div>'+
+    '<button type="button" class="btn-close btn-close-white me-2 m-auto" onclick="this.closest(\'.toast\').remove()"></button></div>';
+  document.getElementById('toasts').appendChild(el);
+  setTimeout(()=>el.remove(), kind==='danger'?9000:3500);
+}
+function modal(title, bodyHtml, footHtml){
+  const root=document.getElementById('modalRoot');
+  root.innerHTML='<div class="modal fade" id="theModal" tabindex="-1"><div class="modal-dialog modal-lg modal-dialog-scrollable"><div class="modal-content">'+
+    '<div class="modal-header"><h6 class="modal-title">'+esc(title)+'</h6><button class="btn-close" data-bs-dismiss="modal"></button></div>'+
+    '<div class="modal-body">'+bodyHtml+'</div>'+
+    '<div class="modal-footer">'+(footHtml||'')+'</div></div></div></div>';
+  const m=new bootstrap.Modal(document.getElementById('theModal'));
+  m.show(); return m;
+}
+let _theModal=null;
+function v(id){ return document.getElementById(id).value; }
+
+/* =========================== dashboard =========================== */
+function renderDashboard(){
+  if(notReady('dashboard')) return;
+  const c=APP.completeness||{totalLines:0,gaps:[]};
+  const gapsHtml = c.gaps.length
+    ? c.gaps.map(g=>'<tr><td>'+g.modellingId+'</td><td>'+esc(lineLabel(g.modellingId))+'</td><td><span class="badge badge-gap">'+g.missing.join(', ')+'</span></td></tr>').join('')
+    : '<tr><td colspan="3" class="text-success">All active lines have rates, component mix and cold chain mix.</td></tr>';
+  pane('dashboard').innerHTML=
+    '<div class="row g-3">'+
+    '<div class="col-md-4"><div class="card p-3"><div class="text-muted">Active modelling lines</div><h3>'+c.totalLines+'</h3></div></div>'+
+    '<div class="col-md-4"><div class="card p-3"><div class="text-muted">Last recalculation</div><h6 class="mt-2">'+esc(APP.config.lastRecalc||'Never')+'</h6></div></div>'+
+    '<div class="col-md-4"><div class="card p-3"><div class="text-muted">Comparing against snapshot</div><h6 class="mt-2">'+esc(APP.config.compareSnapshot||'-')+'</h6></div></div>'+
+    '</div>'+
+    '<div class="card p-3 mt-3"><h6>Completeness checks</h6>'+
+    '<table class="table table-sm"><thead><tr><th>Line</th><th>Description</th><th>Missing</th></tr></thead><tbody>'+gapsHtml+'</tbody></table></div>';
+}
+
+/* =========================== rate card =========================== */
+function selOptions(sel, list){ return list.map(x=>'<option '+(sel===x?'selected':'')+'>'+x+'</option>').join(''); }
+function renderRates(){
+  if(notReady('rates')) return;
+  const brands=[...new Set(APP.ref.highLevelIds.map(h=>h.Brand))].sort();
+  const geos=[...new Set(APP.ref.highLevelIds.map(h=>h.Geo))].sort();
+  const f=APP.filters;
+  let rows=APP.rates.filter(r=>String(r.Active).toUpperCase()!=='N');
+  rows=rows.filter(r=>{
+    const l=lineById(r.Modelling_ID); if(!l) return true;
+    const h=hlById(l.High_Level_ID)||{};
+    if(f.rateBrand && h.Brand!==f.rateBrand) return false;
+    if(f.rateGeo && h.Geo!==f.rateGeo) return false;
+    if(f.rateSearch){
+      const hay=(lineLabel(r.Modelling_ID)+' '+r.Comment+' '+r.Modelling_ID).toLowerCase();
+      if(hay.indexOf(f.rateSearch.toLowerCase())<0) return false;
+    }
+    return true;
+  });
+  const shown=rows.slice(0,600);
+  pane('rates').innerHTML=
+    '<div class="d-flex flex-wrap gap-2 mb-2 align-items-center">'+
+    '<select class="form-select form-select-sm table-filter" onchange="APP.filters.rateBrand=this.value;renderRates()"><option value="">All brands</option>'+selOptions(f.rateBrand,brands)+'</select>'+
+    '<select class="form-select form-select-sm table-filter" onchange="APP.filters.rateGeo=this.value;renderRates()"><option value="">All geos</option>'+selOptions(f.rateGeo,geos)+'</select>'+
+    '<input class="form-control form-control-sm table-filter" placeholder="Search component / comment / ID" value="'+esc(f.rateSearch)+'" oninput="APP.filters.rateSearch=this.value;renderRates()">'+
+    (isEditor()?'<button class="btn btn-sm btn-primary ms-auto" onclick="openRateModal(null)"><i class="bi bi-plus-lg"></i> Add rate</button>':'')+
+    '</div>'+
+    '<div class="card p-2"><div class="table-responsive"><table class="table table-sm table-hover mb-1"><thead><tr>'+
+    '<th>#</th><th>Line</th><th>CC</th><th>Type</th><th>From</th><th>To</th><th class="num">CPU</th><th class="num">QTY</th><th>Comment</th><th></th>'+
+    '</tr></thead><tbody>'+
+    shown.map(r=>'<tr>'+
+      '<td>'+r.Rate_ID+'</td><td>'+esc(lineLabel(r.Modelling_ID))+'</td>'+
+      '<td>'+esc(r.CC_Flag)+'</td><td>'+esc(r.Customer_Type)+'</td>'+
+      '<td>'+esc(r.From_Date)+'</td><td>'+esc(r.To_Date)+'</td>'+
+      '<td class="num">'+num(r.CPU)+'</td><td class="num">'+num(r.QTY,2)+'</td>'+
+      '<td class="comment-cell" title="'+esc(r.Comment)+'">'+esc(r.Comment)+'</td>'+
+      '<td class="text-nowrap">'+(isEditor()?
+        '<i class="bi bi-pencil clickable me-2" onclick="openRateModal('+r.Rate_ID+')"></i>'+
+        '<i class="bi bi-trash clickable text-danger" onclick="delRate('+r.Rate_ID+')"></i>':'')+'</td>'+
+      '</tr>').join('')+
+    '</tbody></table></div>'+
+    '<div class="text-muted small px-2">'+rows.length+' rows'+(rows.length>shown.length?' (showing first '+shown.length+' - narrow the filters)':'')+'</div></div>';
+}
+function openRateModal(rateId){
+  const r = rateId ? APP.rates.find(x=>String(x.Rate_ID)===String(rateId)) : null;
+  const lineOpts = APP.ref.lines.filter(l=>String(l.Active).toUpperCase()!=='N')
+    .map(l=>'<option value="'+l.Modelling_ID+'" '+(r&&String(r.Modelling_ID)===String(l.Modelling_ID)?'selected':'')+'>'+esc(l.Modelling_ID+' - '+lineLabel(l.Modelling_ID))+'</option>').join('');
+  _theModal=modal(rateId?('Edit rate #'+rateId):'Add rate',
+    '<div class="row g-2">'+
+    '<div class="col-12"><label class="form-label">Modelling line</label><select id="rm_line" class="form-select form-select-sm">'+lineOpts+'</select></div>'+
+    '<div class="col-md-3"><label class="form-label">CC flag</label><select id="rm_cc" class="form-select form-select-sm">'+selOptions(r?r.CC_Flag:'Both',['Both','CC','Ambient'])+'</select></div>'+
+    '<div class="col-md-3"><label class="form-label">Customer type</label><select id="rm_ct" class="form-select form-select-sm">'+selOptions(r?r.Customer_Type:'All',['All','New','Repeat','OTC'])+'</select></div>'+
+    '<div class="col-md-3"><label class="form-label">From</label><input type="date" id="rm_from" class="form-control form-control-sm" value="'+(r?r.From_Date:'')+'"></div>'+
+    '<div class="col-md-3"><label class="form-label">To</label><input type="date" id="rm_to" class="form-control form-control-sm" value="'+(r?r.To_Date:'')+'"></div>'+
+    '<div class="col-md-3"><label class="form-label">CPU (local ccy)</label><input type="number" step="any" id="rm_cpu" class="form-control form-control-sm" value="'+(r?r.CPU:'')+'"></div>'+
+    '<div class="col-md-3"><label class="form-label">QTY per order</label><input type="number" step="any" id="rm_qty" class="form-control form-control-sm" value="'+(r?r.QTY:'')+'"></div>'+
+    '<div class="col-md-6"><label class="form-label">Comment</label><input id="rm_com" class="form-control form-control-sm" value="'+esc(r?r.Comment:'')+'"></div>'+
+    '</div><div class="form-text mt-2">Tip: use <b>Both</b>/<b>All</b> when the rate does not differ by cold-chain or customer type - one row instead of up to six.</div>',
+    '<button class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>'+
+    '<button class="btn btn-primary btn-sm" onclick="saveRateFromModal('+(rateId||'null')+')">Save</button>');
+}
+function saveRateFromModal(rateId){
+  const payload={ rateId:rateId, modellingId:v('rm_line'), ccFlag:v('rm_cc'), customerType:v('rm_ct'),
+    fromDate:v('rm_from'), toDate:v('rm_to'), cpu:v('rm_cpu'), qty:v('rm_qty'), comment:v('rm_com') };
+  let item=null, original=null;
+  if(rateId){
+    item=APP.rates.find(x=>String(x.Rate_ID)===String(rateId));
+    original=Object.assign({},item);
+    Object.assign(item,{Modelling_ID:Number(payload.modellingId),CC_Flag:payload.ccFlag,Customer_Type:payload.customerType,
+      From_Date:payload.fromDate,To_Date:payload.toDate,CPU:Number(payload.cpu),QTY:Number(payload.qty),Comment:payload.comment});
+  } else {
+    item={Rate_ID:-Date.now(),Modelling_ID:Number(payload.modellingId),CC_Flag:payload.ccFlag,Customer_Type:payload.customerType,
+      From_Date:payload.fromDate,To_Date:payload.toDate,CPU:Number(payload.cpu),QTY:Number(payload.qty),
+      Comment:payload.comment,Active:'Y',_optimistic:true};
+    APP.rates.unshift(item);
+  }
+  _theModal.hide(); renderRates(); toast('Saved');
+  run('saveRate',[payload], resp=>{
+    if(!rateId && item){ item.Rate_ID=resp.rateId; delete item._optimistic; renderRates(); }
+  }, err=>{
+    if(rateId && original) Object.assign(item,original);
+    else APP.rates=APP.rates.filter(x=>x!==item);
+    renderRates(); toast(err.message,'danger');
+  }, true);
+}
+function delRate(rateId){
+  if(!confirm('Deactivate rate #'+rateId+'? It stays in the history.')) return;
+  const removed=APP.rates.find(x=>String(x.Rate_ID)===String(rateId));
+  APP.rates=APP.rates.filter(x=>x!==removed);
+  renderRates(); toast('Deleted');
+  run('deleteRate',[rateId], null, err=>{
+    APP.rates.unshift(removed); renderRates(); toast(err.message,'danger');
+  }, true);
+}
+
+/* ========================= component mix ========================= */
+function mixGroups(){
+  const groups={};
+  APP.ref.lines.forEach(l=>{
+    if(String(l.Active).toUpperCase()==='N') return;
+    const c=compById(l.Component_ID); if(!c) return;
+    const key=l.High_Level_ID+'||'+c.High_Level_Component;
+    (groups[key]=groups[key]||{hlId:l.High_Level_ID,hlComponent:c.High_Level_Component,lines:[]}).lines.push(l);
+  });
+  return groups;
+}
+function renderCompMix(){
+  if(notReady('compmix')) return;
+  const groups=mixGroups();
+  const activeMix=APP.compMix.filter(m=>String(m.Active).toUpperCase()!=='N');
+  const byLine={};
+  activeMix.forEach(m=>{ (byLine[m.Modelling_ID]=byLine[m.Modelling_ID]||[]).push(m); });
+  const rows=Object.values(groups).sort((a,b)=>a.hlId-b.hlId||a.hlComponent.localeCompare(b.hlComponent)).map((g,gi)=>{
+    const h=hlById(g.hlId);
+    const mixRows=g.lines.flatMap(l=>byLine[l.Modelling_ID]||[]);
+    const split=g.lines.length>1;
+    let status;
+    if(mixRows.length){
+      const anyMix=mixRows.some(m=>Number(m.Mix)>0);
+      status=anyMix?(split?'split across '+g.lines.length:'attach up to '+Math.round(mixRows.reduce((t,m)=>Math.max(t,Number(m.Mix)),0)*100)+'%'):'off';
+    } else status='<span class="badge badge-gap">no mix rows</span>';
+    return '<tr class="clickable" data-hl="'+g.hlId+'" data-comp="'+esc(g.hlComponent)+'">'+
+      '<td>'+esc(hlLabel(h))+'</td><td>'+esc(g.hlComponent)+'</td><td>'+g.lines.length+'</td><td>'+mixRows.length+'</td><td>'+status+'</td></tr>';
+  }).join('');
+  pane('compmix').innerHTML=
+    '<div class="card p-2"><div class="text-muted small px-2 pb-1">Click a group to view/edit its mix rows. Splits across multiple components must total 100% per date range - the portal blocks saves that do not.</div>'+
+    '<table class="table table-sm table-hover mb-0"><thead><tr><th>High Level ID</th><th>High Level Component</th><th>Lines</th><th>Mix rows</th><th>Status</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
+  pane('compmix').querySelectorAll('tr.clickable').forEach(tr=>{
+    tr.onclick=()=>openMixGroup(tr.dataset.hl, tr.dataset.comp);
+  });
+}
+let MIXEDIT=null;
+function openMixGroup(hlId, hlComponent){
+  const g=mixGroups()[hlId+'||'+hlComponent];
+  if(!g) return;
+  MIXEDIT={hlId:hlId, hlComponent:hlComponent, rows:[]};
+  const lineIds=g.lines.map(l=>String(l.Modelling_ID));
+  APP.compMix.forEach(m=>{
+    if(String(m.Active).toUpperCase()==='N') return;
+    if(lineIds.indexOf(String(m.Modelling_ID))<0) return;
+    MIXEDIT.rows.push({mixId:m.Mix_ID, modellingId:m.Modelling_ID, fromDate:m.From_Date, toDate:m.To_Date,
+                       mix:Number(m.Mix), comment:m.Comment, deleted:false});
+  });
+  _theModal=modal('Component mix - '+hlLabel(hlById(hlId))+' / '+hlComponent,
+    '<div id="mixBody"></div>',
+    '<div class="me-auto small" id="mixSum"></div>'+
+    '<button class="btn btn-outline-primary btn-sm" onclick="mixAddRow()">Add row</button>'+
+    '<button class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>'+
+    (isEditor()?'<button class="btn btn-primary btn-sm" id="mixSaveBtn" onclick="saveMixGroup()">Save group</button>':''));
+  renderMixEditor();
+}
+function renderMixEditor(){
+  const g=mixGroups()[MIXEDIT.hlId+'||'+MIXEDIT.hlComponent];
+  const lineOpts=g.lines.map(l=>{
+    const c=compById(l.Component_ID);
+    return {id:l.Modelling_ID, label:(c?c.Component:'?')+' (line '+l.Modelling_ID+')'};
+  });
+  document.getElementById('mixBody').innerHTML=
+    '<table class="table table-sm"><thead><tr><th>Component</th><th>From</th><th>To</th><th>Mix (0-1)</th><th>Comment</th><th></th></tr></thead><tbody>'+
+    MIXEDIT.rows.map((r,i)=> r.deleted?'' :
+      '<tr>'+
+      '<td><select class="form-select form-select-sm" onchange="MIXEDIT.rows['+i+'].modellingId=this.value">'+
+        lineOpts.map(o=>'<option value="'+o.id+'" '+(String(r.modellingId)===String(o.id)?'selected':'')+'>'+esc(o.label)+'</option>').join('')+'</select></td>'+
+      '<td><input type="date" class="form-control form-control-sm" value="'+esc(r.fromDate)+'" onchange="MIXEDIT.rows['+i+'].fromDate=this.value;mixSumPreview()"></td>'+
+      '<td><input type="date" class="form-control form-control-sm" value="'+esc(r.toDate)+'" onchange="MIXEDIT.rows['+i+'].toDate=this.value;mixSumPreview()"></td>'+
+      '<td style="max-width:90px"><input type="number" step="any" min="0" max="1" class="form-control form-control-sm" value="'+r.mix+'" oninput="MIXEDIT.rows['+i+'].mix=Number(this.value);mixSumPreview()"></td>'+
+      '<td><input class="form-control form-control-sm" value="'+esc(r.comment)+'" onchange="MIXEDIT.rows['+i+'].comment=this.value"></td>'+
+      '<td><i class="bi bi-trash clickable text-danger" onclick="MIXEDIT.rows['+i+'].deleted=true;renderMixEditor()"></i></td>'+
+      '</tr>').join('')+
+    '</tbody></table>';
+  mixSumPreview();
+}
+function mixAddRow(){
+  const g=mixGroups()[MIXEDIT.hlId+'||'+MIXEDIT.hlComponent];
+  MIXEDIT.rows.push({mixId:null, modellingId:g.lines[0].Modelling_ID,
+    fromDate:APP.config.horizonStart, toDate:APP.config.horizonEnd, mix:1, comment:'', deleted:false});
+  renderMixEditor();
+}
+function mixSumPreview(){
+  const act=MIXEDIT.rows.filter(r=>!r.deleted);
+  const el=document.getElementById('mixSum'); if(!el) return;
+  if(!act.length){ el.innerHTML='No active rows - component will be off.'; return; }
+  const starts=[...new Set(act.map(r=>r.fromDate))].sort();
+  el.innerHTML=starts.map(s=>{
+    const covering=act.filter(r=>r.fromDate<=s && r.toDate>=s);
+    const sum=covering.reduce((t,r)=>t+(Number(r.mix)||0),0);
+    const nz=covering.filter(r=>Number(r.mix)>0).length;
+    const ok = nz<2 || Math.abs(sum-1)<=0.0005;
+    return '<span class="'+(ok?'mix-sum-ok':'mix-sum-bad')+' me-3">'+s+': '+(sum*100).toFixed(1)+'%</span>';
+  }).join('');
+}
+function saveMixGroup(){
+  const btn=document.getElementById('mixSaveBtn');
+  btn.disabled=true; btn.textContent='Saving...';
+  run('saveComponentMixGroup',[{highLevelId:MIXEDIT.hlId, hlComponent:MIXEDIT.hlComponent, rows:MIXEDIT.rows}],
+    resp=>{
+      _theModal.hide(); toast('Mix group saved');
+      run('loadAllAppData',[],d2=>{ Object.assign(APP,{compMix:d2.compMix,completeness:d2.completeness}); renderActive(); });
+    },
+    err=>{ btn.disabled=false; btn.textContent='Save group'; toast(err.message,'danger'); },
+    true);
+}
+
+/* ========================== cold chain ========================== */
+function renderCCMix(){
+  if(notReady('ccmix')) return;
+  const active=APP.ccMix.filter(m=>String(m.Active).toUpperCase()!=='N')
+    .sort((a,b)=>a.High_Level_ID-b.High_Level_ID || (a.From_Date<b.From_Date?-1:1));
+  pane('ccmix').innerHTML=
+    '<div class="d-flex mb-2">'+(isEditor()?'<button class="btn btn-sm btn-primary ms-auto" onclick="openCCModal(null)"><i class="bi bi-plus-lg"></i> Add range</button>':'')+'</div>'+
+    '<div class="card p-2"><table class="table table-sm table-hover mb-0"><thead><tr>'+
+    '<th>#</th><th>High Level ID</th><th>From</th><th>To</th><th class="num">CC %</th><th>Comment</th><th></th></tr></thead><tbody>'+
+    active.map(m=>'<tr><td>'+m.CC_Mix_ID+'</td><td>'+esc(hlLabel(hlById(m.High_Level_ID)))+'</td>'+
+      '<td>'+esc(m.From_Date)+'</td><td>'+esc(m.To_Date)+'</td>'+
+      '<td class="num">'+(Number(m.CC_Mix)*100).toFixed(1)+'%</td>'+
+      '<td class="comment-cell">'+esc(m.Comment)+'</td>'+
+      '<td class="text-nowrap">'+(isEditor()?
+        '<i class="bi bi-pencil clickable me-2" onclick="openCCModal('+m.CC_Mix_ID+')"></i>'+
+        '<i class="bi bi-trash clickable text-danger" onclick="delCC('+m.CC_Mix_ID+')"></i>':'')+'</td></tr>').join('')+
+    '</tbody></table></div>';
+}
+function openCCModal(id){
+  const m=id?APP.ccMix.find(x=>String(x.CC_Mix_ID)===String(id)):null;
+  const hlOpts=APP.ref.highLevelIds.filter(h=>String(h.Active).toUpperCase()!=='N')
+    .map(h=>'<option value="'+h.High_Level_ID+'" '+(m&&String(m.High_Level_ID)===String(h.High_Level_ID)?'selected':'')+'>'+esc(h.High_Level_ID+' - '+hlLabel(h))+'</option>').join('');
+  _theModal=modal(id?('Edit cold chain range #'+id):'Add cold chain range',
+    '<div class="row g-2">'+
+    '<div class="col-12"><label class="form-label">High Level ID</label><select id="cc_hl" class="form-select form-select-sm">'+hlOpts+'</select></div>'+
+    '<div class="col-md-4"><label class="form-label">From (any day)</label><input type="date" id="cc_from" class="form-control form-control-sm" value="'+(m?m.From_Date:'')+'"></div>'+
+    '<div class="col-md-4"><label class="form-label">To (any day)</label><input type="date" id="cc_to" class="form-control form-control-sm" value="'+(m?m.To_Date:'')+'"></div>'+
+    '<div class="col-md-4"><label class="form-label">CC mix (0-1)</label><input type="number" step="any" min="0" max="1" id="cc_mix" class="form-control form-control-sm" value="'+(m?m.CC_Mix:'1')+'"></div>'+
+    '<div class="col-12"><label class="form-label">Comment</label><input id="cc_com" class="form-control form-control-sm" value="'+esc(m?m.Comment:'')+'"></div></div>'+
+    '<div class="form-text mt-2">Mid-month transitions are supported - e.g. end a 100% range on 14 Oct and start an 80% range on 15 Oct; the engine day-weights automatically.</div>',
+    '<button class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>'+
+    '<button class="btn btn-primary btn-sm" onclick="saveCCFromModal('+(id||'null')+')">Save</button>');
+}
+function saveCCFromModal(id){
+  const payload={ccMixId:id, highLevelId:v('cc_hl'), fromDate:v('cc_from'), toDate:v('cc_to'), mix:v('cc_mix'), comment:v('cc_com')};
+  let item=null, original=null;
+  if(id){
+    item=APP.ccMix.find(x=>String(x.CC_Mix_ID)===String(id));
+    original=Object.assign({},item);
+    Object.assign(item,{High_Level_ID:Number(payload.highLevelId),From_Date:payload.fromDate,To_Date:payload.toDate,
+      CC_Mix:Number(payload.mix),Comment:payload.comment});
+  } else {
+    item={CC_Mix_ID:-Date.now(),High_Level_ID:Number(payload.highLevelId),From_Date:payload.fromDate,
+      To_Date:payload.toDate,CC_Mix:Number(payload.mix),Comment:payload.comment,Active:'Y',_optimistic:true};
+    APP.ccMix.unshift(item);
+  }
+  _theModal.hide(); renderCCMix(); toast('Saved');
+  run('saveCCMix',[payload], resp=>{
+    if(!id && item){ item.CC_Mix_ID=resp.ccMixId; delete item._optimistic; renderCCMix(); }
+  }, err=>{
+    if(id && original) Object.assign(item,original);
+    else APP.ccMix=APP.ccMix.filter(x=>x!==item);
+    renderCCMix(); toast(err.message,'danger');
+  }, true);
+}
+function delCC(id){
+  if(!confirm('Deactivate cold chain range #'+id+'?')) return;
+  const removed=APP.ccMix.find(x=>String(x.CC_Mix_ID)===String(id));
+  APP.ccMix=APP.ccMix.filter(x=>x!==removed);
+  renderCCMix(); toast('Deleted');
+  run('deleteCCMix',[id], null, err=>{ APP.ccMix.unshift(removed); renderCCMix(); toast(err.message,'danger'); }, true);
+}
+
+/* ============================ output ============================ */
+function renderOutput(){
+  if(notReady('output')) return;
+  const brands=[...new Set(APP.ref.highLevelIds.map(h=>h.Brand))].sort();
+  const geos=[...new Set(APP.ref.highLevelIds.map(h=>h.Geo))].sort();
+  const f=APP.filters;
+  let rows=APP.output.filter(r=>{
+    if(f.outBrand && r.Brand!==f.outBrand) return false;
+    if(f.outGeo && r.Geo!==f.outGeo) return false;
+    if(f.outType && r.Customer_Type!==f.outType) return false;
+    return true;
+  });
+  const shown=rows.slice(0,800);
+  const snapOpts=['(none)'].concat(APP.ref.snapshots).map(s=>'<option '+((APP.config.compareSnapshot||'(none)')===s?'selected':'')+'>'+esc(s)+'</option>').join('');
+  pane('output').innerHTML=
+    '<div class="d-flex flex-wrap gap-2 mb-2 align-items-center">'+
+    '<select class="form-select form-select-sm table-filter" onchange="APP.filters.outBrand=this.value;renderOutput()"><option value="">All brands</option>'+selOptions(f.outBrand,brands)+'</select>'+
+    '<select class="form-select form-select-sm table-filter" onchange="APP.filters.outGeo=this.value;renderOutput()"><option value="">All geos</option>'+selOptions(f.outGeo,geos)+'</select>'+
+    '<select class="form-select form-select-sm table-filter" onchange="APP.filters.outType=this.value;renderOutput()"><option value="">All types</option>'+selOptions(f.outType,['New','Repeat','OTC'])+'</select>'+
+    '<span class="ms-auto small text-muted">Compare vs</span>'+
+    '<select class="form-select form-select-sm table-filter" id="snapSel" '+(isEditor()?'':'disabled')+' onchange="changeCompareSnapshot(this.value)">'+snapOpts+'</select>'+
+    (isEditor()?'<button class="btn btn-sm btn-outline-primary" onclick="doSnapshot()"><i class="bi bi-camera"></i> Snapshot</button>':'')+
+    (isEditor()?'<button class="btn btn-sm btn-success" id="recalcBtn" onclick="doRecalc()"><i class="bi bi-arrow-repeat"></i> Recalculate</button>':'')+
+    '</div>'+
+    '<div class="text-muted small mb-1">Last recalc: '+esc(APP.config.lastRecalc||'never')+' - the Output tab of the Google Sheet mirrors this table for downstream extracts (local currency + GBP).</div>'+
+    '<div class="card p-2"><div class="table-responsive"><table class="table table-sm mb-1"><thead><tr>'+
+    '<th>HL</th><th>Month</th><th>Type</th><th>Brand</th><th>Geo</th><th>Treatment</th><th>Detail</th><th>Ccy</th>'+
+    '<th class="num">Cost (local)</th><th class="num">Cost (GBP)</th><th class="num">Snapshot</th><th class="num">Variance</th></tr></thead><tbody>'+
+    shown.map(r=>'<tr><td>'+r.High_Level_ID+'</td><td>'+esc(String(r.Month).slice(0,7))+'</td><td>'+esc(r.Customer_Type)+'</td>'+
+      '<td>'+esc(r.Brand)+'</td><td>'+esc(r.Geo)+'</td><td>'+esc(r.Treatment_Type)+'</td><td>'+esc(r.WL_Detail)+'</td><td>'+esc(r.Currency)+'</td>'+
+      '<td class="num">'+num(r.Cost_Local)+'</td><td class="num">'+num(r.Cost_GBP)+'</td>'+
+      '<td class="num">'+num(r.Snapshot_Cost_Local)+'</td>'+
+      '<td class="num '+(Number(r.Variance_Local)>0.0001?'text-danger':Number(r.Variance_Local)<-0.0001?'text-success':'')+'">'+num(r.Variance_Local)+'</td></tr>').join('')+
+    '</tbody></table></div>'+
+    '<div class="text-muted small px-2">'+rows.length+' rows'+(rows.length>shown.length?' (showing first '+shown.length+')':'')+'</div></div>';
+}
+function doRecalc(){
+  const b=document.getElementById('recalcBtn');
+  b.disabled=true; b.innerHTML='<span class="spinner-border spinner-border-sm"></span> Recalculating...';
+  run('recalculate',[], resp=>{
+    toast('Recalculated '+resp.lines+' lines x '+resp.months+' months');
+    run('loadAllAppData',[],d2=>{ Object.assign(APP,{output:d2.output, config:d2.config, completeness:d2.completeness}); renderActive(); });
+  }, err=>{ b.disabled=false; b.innerHTML='<i class="bi bi-arrow-repeat"></i> Recalculate'; toast(err.message,'danger'); }, true);
+}
+function doSnapshot(){
+  const name=prompt('Name this snapshot (e.g. "RFQ4 2026 final"):');
+  if(!name) return;
+  run('createSnapshot',[name], resp=>{
+    APP.ref.snapshots.push(resp.name); toast('Snapshot "'+resp.name+'" saved ('+resp.rows+' rows)'); renderOutput();
+  }, null, true);
+}
+function changeCompareSnapshot(name){
+  const clean=name==='(none)'?'':name;
+  run('setCompareSnapshot',[clean], resp=>{
+    APP.config.compareSnapshot=resp.compareSnapshot;
+    toast('Comparison set to '+(clean||'none')+' - hit Recalculate to refresh the variance columns');
+  }, null, true);
+}
+
+/* ========================== dimensions ========================== */
+function fld(id,label,val,size){
+  return '<div class="col-md-'+(size||4)+'"><label class="form-label">'+label+'</label>'+
+         '<input id="'+id+'" class="form-control form-control-sm" value="'+esc(val==null?'':val)+'"></div>';
+}
+function renderDims(){
+  if(!isAdmin()){ pane('dims').innerHTML='<div class="alert alert-warning">Admins only.</div>'; return; }
+  const hl=APP.ref.highLevelIds, cp=APP.ref.components, ln=APP.ref.lines, ar=APP.ref.areas;
+  pane('dims').innerHTML=
+  '<div class="row g-3">'+
+  '<div class="col-lg-6"><div class="card p-3"><div class="d-flex"><h6>High Level IDs</h6>'+
+    '<button class="btn btn-sm btn-outline-primary ms-auto" onclick="editHL(null)">Add</button></div>'+
+    '<table class="table table-sm mb-0"><thead><tr><th>ID</th><th>Brand</th><th>Geo</th><th>Treat</th><th>Detail</th><th>Ccy</th><th>Act</th><th></th></tr></thead><tbody>'+
+    hl.map(h=>'<tr><td>'+h.High_Level_ID+'</td><td>'+esc(h.Brand)+'</td><td>'+esc(h.Geo)+'</td><td>'+esc(h.Treatment_Type)+'</td><td>'+esc(h.WL_Detail)+'</td><td>'+esc(h.Currency)+'</td><td>'+esc(h.Active)+'</td>'+
+    '<td><i class="bi bi-pencil clickable" onclick="editHL('+h.High_Level_ID+')"></i></td></tr>').join('')+'</tbody></table></div></div>'+
+  '<div class="col-lg-6"><div class="card p-3"><div class="d-flex"><h6>Components</h6>'+
+    '<button class="btn btn-sm btn-outline-primary ms-auto" onclick="editComp(null)">Add</button></div>'+
+    '<div style="max-height:420px;overflow:auto"><table class="table table-sm mb-0"><thead><tr><th>ID</th><th>High Level Component</th><th>Component</th><th>Act</th><th></th></tr></thead><tbody>'+
+    cp.map(c=>'<tr><td>'+c.Component_ID+'</td><td>'+esc(c.High_Level_Component)+'</td><td>'+esc(c.Component)+'</td><td>'+esc(c.Active)+'</td>'+
+    '<td><i class="bi bi-pencil clickable" onclick="editComp('+c.Component_ID+')"></i></td></tr>').join('')+'</tbody></table></div></div></div>'+
+  '<div class="col-lg-6"><div class="card p-3"><div class="d-flex"><h6>Modelling Lines</h6>'+
+    '<button class="btn btn-sm btn-outline-primary ms-auto" onclick="editLine(null)">Add</button></div>'+
+    '<div style="max-height:420px;overflow:auto"><table class="table table-sm mb-0"><thead><tr><th>ID</th><th>High Level</th><th>Component</th><th>Act</th><th></th></tr></thead><tbody>'+
+    ln.map(l=>{const c=compById(l.Component_ID);return '<tr><td>'+l.Modelling_ID+'</td><td>'+esc(hlLabel(hlById(l.High_Level_ID)))+'</td><td>'+esc(c?c.Component:'?')+'</td><td>'+esc(l.Active)+'</td>'+
+    '<td><i class="bi bi-pencil clickable" onclick="editLine('+l.Modelling_ID+')"></i></td></tr>';}).join('')+'</tbody></table></div></div></div>'+
+  '<div class="col-lg-6"><div class="card p-3"><div class="d-flex"><h6>Modelling Areas</h6>'+
+    '<button class="btn btn-sm btn-outline-primary ms-auto" onclick="editArea(null)">Add</button></div>'+
+    '<table class="table table-sm mb-0"><thead><tr><th>ID</th><th>Name</th><th>Customer types</th><th>Act</th><th></th></tr></thead><tbody>'+
+    ar.map(a=>'<tr><td>'+a.Area_ID+'</td><td>'+esc(a.Area_Name)+'</td><td>'+esc(a.Customer_Types)+'</td><td>'+esc(a.Active)+'</td>'+
+    '<td><i class="bi bi-pencil clickable" onclick="editArea('+a.Area_ID+')"></i></td></tr>').join('')+'</tbody></table>'+
+    '<div class="form-text mt-2">To add a future breakdown (e.g. Mounjaro Bundles): add a High Level ID with the new WL Detail, then add its Modelling Lines here. The Dashboard will flag the missing rates and mixes to fill in.</div></div></div>'+
+  '</div>';
+}
+function reloadRefAfterDim(){
+  run('initApp',[],d=>{ APP.ref=d.ref; APP.config=d.config; renderActive(); });
+}
+function editHL(id){
+  const h=id?APP.ref.highLevelIds.find(x=>String(x.High_Level_ID)===String(id)):{};
+  _theModal=modal(id?'Edit High Level ID '+id:'Add High Level ID',
+    '<div class="row g-2">'+fld('h_brand','Brand',h.Brand)+fld('h_geo','Geo (GB/US/DE/CA)',h.Geo)+
+    fld('h_treat','Treatment Type',h.Treatment_Type)+fld('h_detail','WL Detail',h.WL_Detail)+
+    fld('h_ccy','Currency',h.Currency||'GBP')+fld('h_comment','Comment',h.Comment,8)+
+    '<div class="col-md-4"><label class="form-label">Active</label><select id="h_active" class="form-select form-select-sm"><option>Y</option><option '+(h.Active==='N'?'selected':'')+'>N</option></select></div></div>',
+    '<button class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button><button class="btn btn-primary btn-sm" onclick="submitHL('+(id||'null')+')">Save</button>');
+}
+function submitHL(id){
+  run('saveHighLevelId',[{id:id,areaId:1,brand:v('h_brand'),geo:v('h_geo'),treatmentType:v('h_treat'),
+    wlDetail:v('h_detail'),currency:v('h_ccy'),active:v('h_active'),comment:v('h_comment')}],
+    ()=>{ _theModal.hide(); toast('Saved'); reloadRefAfterDim(); }, err=>toast(err.message,'danger'), true);
+}
+function editComp(id){
+  const c=id?APP.ref.components.find(x=>String(x.Component_ID)===String(id)):{};
+  _theModal=modal(id?'Edit component '+id:'Add component',
+    '<div class="row g-2">'+fld('c_hlc','High Level Component',c.High_Level_Component,6)+fld('c_name','Component',c.Component,6)+
+    fld('c_comment','Comment',c.Comment,8)+
+    '<div class="col-md-4"><label class="form-label">Active</label><select id="c_active" class="form-select form-select-sm"><option>Y</option><option '+(c.Active==='N'?'selected':'')+'>N</option></select></div></div>',
+    '<button class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button><button class="btn btn-primary btn-sm" onclick="submitComp('+(id||'null')+')">Save</button>');
+}
+function submitComp(id){
+  run('saveComponent',[{id:id,areaId:1,highLevelComponent:v('c_hlc'),component:v('c_name'),active:v('c_active'),comment:v('c_comment')}],
+    ()=>{ _theModal.hide(); toast('Saved'); reloadRefAfterDim(); }, err=>toast(err.message,'danger'), true);
+}
+function editLine(id){
+  const l=id?APP.ref.lines.find(x=>String(x.Modelling_ID)===String(id)):{};
+  const hlOpts=APP.ref.highLevelIds.map(h=>'<option value="'+h.High_Level_ID+'" '+(l.High_Level_ID==h.High_Level_ID?'selected':'')+'>'+esc(h.High_Level_ID+' - '+hlLabel(h))+'</option>').join('');
+  const cpOpts=APP.ref.components.map(c=>'<option value="'+c.Component_ID+'" '+(l.Component_ID==c.Component_ID?'selected':'')+'>'+esc(c.High_Level_Component+' / '+c.Component)+'</option>').join('');
+  _theModal=modal(id?'Edit line '+id:'Add modelling line',
+    '<div class="row g-2">'+
+    '<div class="col-md-6"><label class="form-label">High Level ID</label><select id="l_hl" class="form-select form-select-sm">'+hlOpts+'</select></div>'+
+    '<div class="col-md-6"><label class="form-label">Component</label><select id="l_cp" class="form-select form-select-sm">'+cpOpts+'</select></div>'+
+    fld('l_comment','Comment',l.Comment,8)+
+    '<div class="col-md-4"><label class="form-label">Active</label><select id="l_active" class="form-select form-select-sm"><option>Y</option><option '+(l.Active==='N'?'selected':'')+'>N</option></select></div></div>',
+    '<button class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button><button class="btn btn-primary btn-sm" onclick="submitLine('+(id||'null')+')">Save</button>');
+}
+function submitLine(id){
+  run('saveLine',[{id:id,highLevelId:v('l_hl'),componentId:v('l_cp'),active:v('l_active'),comment:v('l_comment')}],
+    ()=>{ _theModal.hide(); toast('Saved'); reloadRefAfterDim(); }, err=>toast(err.message,'danger'), true);
+}
+function editArea(id){
+  const a=id?APP.ref.areas.find(x=>String(x.Area_ID)===String(id)):{};
+  _theModal=modal(id?'Edit area '+id:'Add area',
+    '<div class="row g-2">'+fld('a_name','Area name',a.Area_Name)+fld('a_metric','Output metric name',a.Output_Metric_Name)+
+    fld('a_types','Customer types (CSV)',a.Customer_Types||'New,Repeat,OTC')+
+    '<div class="col-md-4"><label class="form-label">Active</label><select id="a_active" class="form-select form-select-sm"><option>Y</option><option '+(a.Active==='N'?'selected':'')+'>N</option></select></div></div>',
+    '<button class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button><button class="btn btn-primary btn-sm" onclick="submitArea('+(id||'null')+')">Save</button>');
+}
+function submitArea(id){
+  run('saveArea',[{id:id,areaName:v('a_name'),outputMetricName:v('a_metric'),customerTypes:v('a_types'),active:v('a_active')}],
+    ()=>{ _theModal.hide(); toast('Saved'); reloadRefAfterDim(); }, err=>toast(err.message,'danger'), true);
+}
+
+/* =========================== history =========================== */
+function renderHistory(){
+  if(!isAdmin()){ pane('history').innerHTML='<div class="alert alert-warning">Admins only.</div>'; return; }
+  if(notReady('history')) return;
+  const a=APP.audit||[];
+  pane('history').innerHTML='<div class="card p-2"><div class="text-muted small px-2 pb-1">Last '+a.length+' actions. Full row-level snapshots live in the *_Amends tabs of the Google Sheet.</div>'+
+    '<table class="table table-sm mb-0"><thead><tr>'+
+    '<th>When</th><th>Who</th><th>Action</th><th>Table</th><th>Target</th><th>Summary</th></tr></thead><tbody>'+
+    a.map(r=>'<tr><td>'+esc(String(r.Timestamp))+'</td><td>'+esc(r.Email)+'</td><td>'+esc(r.Action)+'</td>'+
+      '<td>'+esc(r.Target_Table)+'</td><td>'+esc(r.Target_ID)+'</td><td>'+esc(r.Summary)+'</td></tr>').join('')+
+    '</tbody></table></div>';
+}
+</script>
+</body>
+</html>
