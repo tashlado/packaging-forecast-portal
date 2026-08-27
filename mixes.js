@@ -98,9 +98,14 @@ function saveComponentMixGroup(payload) {
     for (let i = 1; i < data.length; i++) rowByMixId[String(data[i][c.Mix_ID])] = i;
 
     const results = [];
+    /* Collected rather than written per mix row: a group edit touches every line
+       of a split at once, and one setValues at the end beats one per row. */
+    const auditRows = [];
+    const groupLabel = 'HL ' + payload.highLevelId + ' · ' + payload.hlComponent;
     rows.forEach(r => {
       if (r.mixId && rowByMixId[String(r.mixId)] !== undefined) {
         const i = rowByMixId[String(r.mixId)];
+        const before = data[i].slice();          // captured before rowVals is mutated
         const rowVals = data[i].slice();
         if (r.deleted) {
           rowVals[c.Active] = 'N';
@@ -116,6 +121,9 @@ function saveComponentMixGroup(payload) {
         rowVals[c.Updated_By] = perms.email;
         sh.getRange(i + 1, 1, 1, rowVals.length).setValues([rowVals]);
         appendAmend_(SHEET.COMP_MIX, r.deleted ? 'DELETE' : 'UPDATE', rowVals, perms);
+        logFieldChanges_(perms, r.deleted ? 'DELETE_MIX' : 'UPDATE_MIX', SHEET.COMP_MIX,
+                         r.mixId, before, rowVals, HEADERS[SHEET.COMP_MIX],
+                         { summary: groupLabel, into: auditRows });
         results.push({ mixId: Number(r.mixId) });
       } else if (!r.deleted) {
         const newId = getNextId(SHEET.COMP_MIX, 'Mix_ID');
@@ -125,8 +133,12 @@ function saveComponentMixGroup(payload) {
         results.push({ mixId: newId, tempKey: r.mixId || null });
       }
     });
+    appendAuditRows_(auditRows);
+    /* The group summary stays alongside the per-field rows: the rebalance is one
+       action, and the field rows on their own do not say that five lines moved
+       together on purpose. */
     logAction_(perms, 'SAVE_MIX_GROUP', SHEET.COMP_MIX, '',
-               'HL ' + payload.highLevelId + ' · ' + payload.hlComponent + ' (' + rows.length + ' rows)');
+               groupLabel + ' (' + rows.length + ' rows)');
     return { saved: results, updatedAt: dayStr(now) };
   });
 }
@@ -167,13 +179,15 @@ function saveCCMix(cc) {
     if (cc.ccMixId) {
       for (let i = 1; i < data.length; i++) {
         if (String(data[i][c.CC_Mix_ID]) !== String(cc.ccMixId)) continue;
+        const before = data[i].slice();          // captured before rowVals is mutated
         const rowVals = data[i].slice();
         rowVals[c.From_Date] = from; rowVals[c.To_Date] = to; rowVals[c.CC_Mix] = mix;
         rowVals[c.Comment] = safeStr(cc.comment); rowVals[c.Active] = 'Y';
         rowVals[c.Updated_At] = now; rowVals[c.Updated_By] = perms.email;
         sh.getRange(i + 1, 1, 1, rowVals.length).setValues([rowVals]);
         appendAmend_(SHEET.CC_MIX, 'UPDATE', rowVals, perms);
-        logAction_(perms, 'UPDATE_CC_MIX', SHEET.CC_MIX, cc.ccMixId, 'HL ' + cc.highLevelId);
+        logFieldChanges_(perms, 'UPDATE_CC_MIX', SHEET.CC_MIX, cc.ccMixId, before, rowVals,
+                         HEADERS[SHEET.CC_MIX], { summary: 'HL ' + cc.highLevelId });
         return { ccMixId: Number(cc.ccMixId) };
       }
       throw new Error('Cold chain row #' + cc.ccMixId + ' not found.');

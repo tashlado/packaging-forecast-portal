@@ -66,6 +66,7 @@ function saveRate(rate) {
       // update in place
       for (let i = 1; i < data.length; i++) {
         if (String(data[i][c.Rate_ID]) !== String(rate.rateId)) continue;
+        const before = data[i].slice();          // captured before rowVals is mutated
         const rowVals = data[i].slice();
         rowVals[c.Modelling_ID] = Number(rate.modellingId);
         rowVals[c.CC_Flag] = rate.ccFlag;
@@ -80,7 +81,8 @@ function saveRate(rate) {
         rowVals[c.Updated_By] = perms.email;
         sh.getRange(i + 1, 1, 1, rowVals.length).setValues([rowVals]);
         appendAmend_(SHEET.RATES, 'UPDATE', rowVals, perms);
-        logAction_(perms, 'UPDATE_RATE', SHEET.RATES, rate.rateId, 'MID ' + rate.modellingId);
+        logFieldChanges_(perms, 'UPDATE_RATE', SHEET.RATES, rate.rateId, before, rowVals,
+                         HEADERS[SHEET.RATES], { summary: 'MID ' + rate.modellingId });
         return { rateId: Number(rate.rateId), updatedAt: dayStr(now) };
       }
       throw new Error('Rate #' + rate.rateId + ' not found.');

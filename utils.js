@@ -40,7 +40,7 @@ const HEADERS = {
   'FX_Rates':            ['Month','GBP','USD','EUR','CAD'],
   'Config':              ['Key','Value'],
   'Permissions':         ['Email','Portal_Name','Role','Areas','Active'],
-  'Audit_Log':           ['Log_ID','Timestamp','Email','Action','Target_Table','Target_ID','Summary'],
+  'Audit_Log':           ['Log_ID','Timestamp','Email','Action','Target_Table','Target_ID','Summary','Field','Old_Value','New_Value'],
   'Modelling':           ['Modelling_ID','High_Level_ID','Month','CC_Mix_Applied','Component_Mix_Applied','New','Repeat','OTC'],
   'Output':              ['High_Level_ID','Month','Customer_Type','Brand','Geo','Treatment_Type','WL_Detail','Currency','Cost_Local','FX_to_GBP','Cost_GBP','Compare_Snapshot','Snapshot_Cost_Local','Variance_Local'],
   'Forecast_Snapshots':  ['Snapshot_Name','Created_At','Created_By','High_Level_ID','Month','Customer_Type','Cost_Local'],
@@ -203,9 +203,113 @@ function appendDimAmend_(tableName, amendType, rowId, rowObj, perms) {
                 tableName, rowId, JSON.stringify(rowObj)]);
 }
 function logAction_(perms, action, targetTable, targetId, summary) {
+  appendAuditRows_([auditRow_(perms, action, targetTable, targetId, summary, '', '', '')]);
+}
+
+/* One setValues rather than an appendRow per row. A single save writes one or two
+   rows and would not care, but a bulk change writes hundreds, and appendRow costs
+   an HTTP round trip each — the same reason appendAmendsBatch_ exists. */
+function appendAuditRows_(rows) {
+  if (!rows || !rows.length) return 0;
   const sh = getSheet(SHEET.AUDIT);
-  sh.appendRow([getNextId(SHEET.AUDIT, 'Log_ID'), new Date(), perms.email, action,
-                targetTable || '', targetId === undefined ? '' : targetId, summary || '']);
+  const width = HEADERS[SHEET.AUDIT].length;
+  const padded = rows.map(r => padTo_(r, width));
+  sh.getRange(sh.getLastRow() + 1, 1, padded.length, width).setValues(padded);
+  return padded.length;
+}
+function auditRow_(perms, action, targetTable, targetId, summary, field, oldVal, newVal) {
+  return [getNextId(SHEET.AUDIT, 'Log_ID'), new Date(), perms.email, action,
+          targetTable || '', (targetId === undefined || targetId === null) ? '' : targetId,
+          summary || '', field || '',
+          oldVal === undefined ? '' : oldVal, newVal === undefined ? '' : newVal];
+}
+
+/* Columns every save touches by definition. Both are already on the audit row
+   itself — Timestamp and Email say the same thing — so diffing them would double
+   the row count to record nothing. */
+const AUDIT_SKIP_FIELDS = ['Updated_At', 'Updated_By'];
+
+/* A cell's value as the audit trail should read it.
+ *
+ * Normalised by column name rather than by JavaScript type, because the same
+ * date arrives as three different things depending on how it was read: a Date
+ * from getValues, a serial number from the Advanced Sheets Service (which
+ * prewarmSheetCache_ asks for as SERIAL_NUMBER), or a 'yyyy-mm-dd' string. Diff
+ * those raw and every date column looks changed on every save. */
+function auditValue_(header, v) {
+  if (v === null || v === undefined || v === '') return '';
+  if (/(_Date|^Month$|_At$|Timestamp)/.test(String(header))) {
+    const d = normDate(v);
+    return d ? dayStr(d) : String(v).trim();
+  }
+  if (Object.prototype.toString.call(v) === '[object Date]') return dayStr(v);
+  if (typeof v === 'number') return String(Math.round(v * 1e9) / 1e9);
+  return String(v).trim();
+}
+/* 0.4 and '0.40' are the same rate. A cell formatted as text against one written
+   as a number is a formatting difference, not an amendment. */
+function auditSame_(a, b) {
+  if (a === b) return true;
+  if (a === '' || b === '') return false;
+  const na = Number(a), nb = Number(b);
+  return !isNaN(na) && !isNaN(nb) && na === nb;
+}
+
+/**
+ * One Audit_Log row per field that actually changed, with its old and new value.
+ *
+ * logAction_ writes a one-line summary and nothing else, which answers "who
+ * touched this" but never "what did it say before" — and the full before/after
+ * row is sitting at every call site already. This is the diff of it.
+ *
+ * The *_Amends tabs keep the whole post-change row, which is the authoritative
+ * record; this is the readable one, the one History can show and a person can
+ * scan for the CPU that moved.
+ *
+ * beforeRow absent (a create) writes one summary row rather than a row per
+ * populated column: nothing changed, a record appeared, and Amends already holds
+ * it in full. A save that changed nothing still writes its summary row — the
+ * action happened, and an audit trail that silently omits it is one you cannot
+ * reconcile against.
+ *
+ * opts = { summary, ref, skip, into }
+ *   summary  the context line every row of this action carries.
+ *   ref      groups the rows one action wrote — a bulk batch reference. Written
+ *            as the first token of Summary, so rows from one batch stay findable.
+ *   skip     extra header names to leave out of the diff.
+ *   into     collect rows into this array instead of writing them, so a caller
+ *            touching many rows can flush them in one appendAuditRows_.
+ */
+function logFieldChanges_(perms, action, table, targetId, beforeRow, afterRow, headers, opts) {
+  const o = opts || {};
+  const summary = (o.ref ? o.ref + ' · ' : '') + safeStr(o.summary);
+  const emit = rows => {
+    if (o.into) { o.into.push.apply(o.into, rows); return rows.length; }
+    return appendAuditRows_(rows);
+  };
+
+  if (!beforeRow) {
+    emit([auditRow_(perms, action, table, targetId, summary, '', '', '')]);
+    return 0;
+  }
+
+  const skip = AUDIT_SKIP_FIELDS.concat(o.skip || []);
+  const rows = [];
+  (headers || []).forEach((h, i) => {
+    const name = safeStr(h);
+    if (!name || skip.indexOf(name) >= 0) return;
+    const was = auditValue_(name, beforeRow[i]);
+    const now = auditValue_(name, afterRow[i]);
+    if (auditSame_(was, now)) return;
+    rows.push(auditRow_(perms, action, table, targetId, summary, name, was, now));
+  });
+
+  if (!rows.length) {
+    rows.push(auditRow_(perms, action, table, targetId,
+      (summary ? summary + ' — ' : '') + 'saved, no field changed', '', '', ''));
+  }
+  emit(rows);
+  return rows.length;
 }
 
 /* ---------- config ---------- */

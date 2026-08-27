@@ -16,10 +16,12 @@ function _upsertDim_(sheetName, idHeader, obj, buildRow, summary) {
     if (obj.id) {
       for (let i = 1; i < data.length; i++) {
         if (String(data[i][c[idHeader]]) !== String(obj.id)) continue;
+        const before = data[i].slice();          // buildRow mutates the copy it is given
         const rowVals = buildRow(Number(obj.id), data[i].slice(), c);
         sh.getRange(i + 1, 1, 1, rowVals.length).setValues([rowVals]);
         appendDimAmend_(sheetName, 'UPDATE', obj.id, rowVals, perms);
-        logAction_(perms, 'UPDATE_DIM', sheetName, obj.id, summary);
+        logFieldChanges_(perms, 'UPDATE_DIM', sheetName, obj.id, before, rowVals,
+                         HEADERS[sheetName], { summary: summary });
         return { id: Number(obj.id) };
       }
       throw new Error(idHeader + ' ' + obj.id + ' not found.');

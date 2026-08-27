@@ -1616,14 +1616,18 @@ function renderHistory(){
   if(notReady('history')) return;
   const a=APP.audit||[];
   pane('history').innerHTML='<div class="card"><h2>Recent activity</h2>'+
-    '<div class="note small muted" style="padding:10px 16px 0">Last '+a.length+' actions. '+
-      'Full row-level snapshots live in the *_Amends tabs of the Google Sheet.</div>'+
+    '<div class="note small muted" style="padding:10px 16px 0">Last '+a.length+' rows. A save '+
+      'writes one row per field it changed, so one edit can be several lines. Full row-level '+
+      'snapshots live in the *_Amends tabs of the Google Sheet.</div>'+
     '<div class="tablewrap"><table><thead><tr>'+
-    '<th>When</th><th>Who</th><th>Action</th><th>Table</th><th>Target</th><th>Summary</th></tr></thead><tbody>'+
+    '<th>When</th><th>Who</th><th>Action</th><th>Table</th><th>Target</th><th>Field</th>'+
+    '<th>Was</th><th>Became</th><th>Summary</th></tr></thead><tbody>'+
     (a.length?a.map(r=>'<tr><td>'+esc(String(r.Timestamp))+'</td><td>'+esc(r.Email)+'</td>'+
       '<td>'+esc(r.Action)+'</td><td>'+esc(r.Target_Table)+'</td><td>'+esc(r.Target_ID)+'</td>'+
-      '<td>'+esc(r.Summary)+'</td></tr>').join('')
-     :'<tr><td colspan="6" class="muted">No activity logged yet.</td></tr>')+
+      '<td>'+esc(r.Field)+'</td>'+
+      '<td class="num">'+esc(r.Old_Value)+'</td><td class="num">'+esc(r.New_Value)+'</td>'+
+      '<td class="comment-cell" title="'+esc(r.Summary)+'">'+esc(r.Summary)+'</td></tr>').join('')
+     :'<tr><td colspan="9" class="muted">No activity logged yet.</td></tr>')+
     '</tbody></table></div></div>';
 }
 </script>
