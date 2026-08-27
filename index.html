@@ -173,13 +173,17 @@ input.bad{border-color:var(--err);background:#FFF6F7}
 .mix-sum-ok{color:var(--ok);font-weight:500;margin-right:12px}
 .mix-sum-bad{color:var(--err);font-weight:500;margin-right:12px}
 
-/* ---- multi-select dimension lists (bulk update) ---- */
-.checks{border:1px solid var(--line-2);border-radius:6px;padding:5px 7px;max-height:128px;
+/* ---- multi-select dimension lists (bulk update) ----
+   Named .dimbox, not .checks. The Postage Forecast Portal — whose stylesheet this
+   one is kept in step with — already uses .checks, for a collapsible dropdown.
+   One name over two different components is how a ported style arrives looking
+   like a bug, so this one carries its own name. */
+.dimbox{border:1px solid var(--line-2);border-radius:6px;padding:5px 7px;max-height:128px;
         overflow:auto;display:flex;flex-direction:column;gap:2px;background:var(--surface)}
-.checks label{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--ink-2);
+.dimbox label{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--ink-2);
         cursor:pointer;padding:1px 2px;border-radius:4px;white-space:nowrap}
-.checks label:hover{background:var(--bg)}
-.checks input[type=checkbox]{width:auto;margin:0;flex:0 0 auto}
+.dimbox label:hover{background:var(--bg)}
+.dimbox input[type=checkbox]{width:auto;margin:0;flex:0 0 auto}
 .chead{display:flex;align-items:baseline;gap:8px;margin-bottom:4px}
 .chead .lbl{font-size:11px;color:var(--ink-3);letter-spacing:.04em}
 .chead .lnk{font-size:11px;color:var(--brand);cursor:pointer;background:none;border:none;padding:0}
@@ -666,7 +670,7 @@ function bulkChecks(d, keep){
     '<button type="button" class="lnk" onclick="bulkSetAll(\''+d.key+'\',true)">All</button>'+
     '<button type="button" class="lnk" onclick="bulkSetAll(\''+d.key+'\',false)">None</button>'+
     '<span class="cnt" id="bcnt_'+d.key+'"></span></div>'+
-    '<div class="checks">'+
+    '<div class="dimbox">'+
     (opts.length?opts.map(v=>'<label><input type="checkbox" value="'+esc(v)+'"'+
       (on(v)?' checked':'')+' onchange="bulkCount()">'+esc(v)+'</label>').join('')
      :'<span class="muted small">none defined</span>')+
