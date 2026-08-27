@@ -2,9 +2,13 @@
  * snapshots.gs — named forecast versions (Q7: ad-hoc allowed)
  ************************************************************/
 
+/* Admin, not Editor. A snapshot copies the whole Output tab — every area — under
+   one name, and that name is what the variance columns are then read against. An
+   Editor scoped to one area has no business freezing, or naming, the rest of the
+   book. */
 function createSnapshot(name) {
   prewarmForWrite_([SHEET.OUTPUT, SHEET.SNAPSHOTS]);
-  const perms = requireEditor();
+  const perms = requireAdmin();
   const clean = safeStr(name);
   if (!clean) throw new Error('Snapshot name is required.');
   if (clean.length > 60) throw new Error('Snapshot name too long (max 60 characters).');
@@ -30,9 +34,11 @@ function createSnapshot(name) {
   });
 }
 
+/* Admin for the same reason: COMPARE_SNAPSHOT is one portal-wide config key, so
+   changing it re-baselines the variance every area reads, not just the caller's. */
 function setCompareSnapshot(name) {
   prewarmForWrite_([SHEET.SNAPSHOTS, SHEET.CONFIG]);
-  const perms = requireEditor();
+  const perms = requireAdmin();
   const clean = safeStr(name);
   return withLock(() => {
     setConfig_('COMPARE_SNAPSHOT', clean);

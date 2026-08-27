@@ -1188,15 +1188,20 @@ function renderOutput(){
     '<div class="field filter"><label>Customer type</label><select onchange="APP.filters.outType=this.value;renderOutput()">'+
       '<option value="">All types</option>'+selOptions(f.outType,['New','Repeat','OTC'])+'</select></div>'+
     '<div class="spacer"></div>'+
-    '<div class="field filter"><label>Compare vs</label><select id="snapSel" '+(isEditor()?'':'disabled')+
+    /* Recalculate, Snapshot and the comparison baseline are portal-wide — they move
+       every area at once — so they are Admin's, and the server re-checks. Export
+       and Copy are reads, and belong to anyone who can see the table. */
+    '<div class="field filter"><label>Compare vs</label><select id="snapSel" '+(isAdmin()?'':'disabled')+
       ' onchange="changeCompareSnapshot(this.value)">'+snapOpts+'</select></div>'+
     '<button class="btn" onclick="exportOutputCsv()">Export CSV</button>'+
     '<button class="btn" onclick="copyOutputCsv()">Copy</button>'+
-    (isEditor()?'<button class="btn" onclick="doSnapshot()">Snapshot</button>':'')+
-    (isEditor()?'<button class="btn primary" id="recalcBtn" onclick="doRecalc()">Recalculate</button>':'')+
+    (isAdmin()?'<button class="btn" onclick="doSnapshot()">Snapshot</button>':'')+
+    (isAdmin()?'<button class="btn primary" id="recalcBtn" onclick="doRecalc()">Recalculate</button>':'')+
     '</div>'+
     '<div class="hint">Last recalc: '+esc(APP.config.lastRecalc||'never')+' — the Output tab of the '+
-      'Google Sheet mirrors this table for downstream extracts (local currency + GBP).</div>'+
+      'Google Sheet mirrors this table for downstream extracts (local currency + GBP).'+
+      (isAdmin()?'':' Recalculating and snapshotting are Admin-only, because they move every '+
+        'modelling area at once.')+'</div>'+
     '</div></div>'+
     '<div class="card"><div class="tablewrap"><table><thead><tr>'+
     '<th>HL</th><th>Month</th><th>Type</th><th>Brand</th><th>Geo</th><th>Treatment</th><th>Detail</th><th>Ccy</th>'+

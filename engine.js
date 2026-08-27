@@ -22,7 +22,12 @@ function utcDay_(d) { return Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()
 function recalculate() {
   prewarmForWrite_([SHEET.RATES, SHEET.COMP_MIX, SHEET.CC_MIX, SHEET.FX,
                     SHEET.MODELLING, SHEET.OUTPUT, SHEET.SNAPSHOTS, SHEET.VALIDATION]);
-  const perms = requireEditor();
+  /* Admin, not Editor. A recalculation rewrites Modelling and Output for every
+     modelling area there is, so an Editor scoped to one area could move the
+     numbers for areas they cannot edit a single row of. There is no per-area
+     version of this to fall back on — the engine costs the whole book at once —
+     so the rank has to carry the scope. */
+  const perms = requireAdmin();
   const t0 = Date.now();
   const result = withLock(() => {
     const computed = computeAll_();
