@@ -380,10 +380,19 @@ function applyBulkRateChange_(p, plan, perms) {
   const data = source.map(r => padTo_(r, width));
   const amends = [];
   const creates = [];
+  /* Collected, not written per row. A bulk change produces one audit row per
+     changed field per rate, which is hundreds — appendRow each would be hundreds
+     of round trips, the same reason appendAmendsBatch_ exists. */
+  const auditRows = [];
   let closed = 0, revised = 0;
 
   plan.items.forEach(it => {
     const i = it.dataIndex;
+    /* The row as it stands before this item touches it. Read once, because the
+       close overwrites data[i] and the create then has to diff against what was
+       there rather than against the row it just closed. */
+    const wasRow = data[i].slice();
+    const scope = it.label + ' ' + it.ccFlag + '/' + it.customerType;
     /* Re-checked here rather than trusted from the plan: the plan ran outside the
        lock, and a per-row rights check is what every single save does. */
     if (perms.rank < ROLE_RANK.Admin && !canAccessArea_(perms, it.areaId)) {
@@ -404,6 +413,10 @@ function applyBulkRateChange_(p, plan, perms) {
       row[c.Updated_By] = perms.email;
       data[i] = row;
       amends.push({ type: 'UPDATE', rowValues: row });
+      logFieldChanges_(perms, 'BULK_REVISE_RATE', SHEET.RATES, it.rateId, wasRow, row,
+                       HEADERS[SHEET.RATES],
+                       { ref: batchRef, summary: scope + ' — period revised in place',
+                         into: auditRows });
       revised++;
       return;
     }
@@ -415,6 +428,10 @@ function applyBulkRateChange_(p, plan, perms) {
     closeRow[c.Updated_By] = perms.email;
     data[i] = closeRow;
     amends.push({ type: 'UPDATE', rowValues: closeRow });
+    logFieldChanges_(perms, 'BULK_CLOSE_RATE', SHEET.RATES, it.rateId, wasRow, closeRow,
+                     HEADERS[SHEET.RATES],
+                     { ref: batchRef, summary: scope + ' — period closed the day before ' + plan.fromKey,
+                       into: auditRows });
     closed++;
 
     const fresh = padTo_([], width);
@@ -434,6 +451,16 @@ function applyBulkRateChange_(p, plan, perms) {
     creates.push(fresh);
     data.push(fresh);
     amends.push({ type: 'CREATE', rowValues: fresh });
+    /* Diffed against the row it supersedes rather than logged as a bare create:
+       what a reader wants from a bulk change is "this rate went from X to Y", and
+       that sentence only exists across the two rows. Rate_ID is skipped — a new
+       row having a new id is not a field that changed — and the id it replaces is
+       named in the summary instead. */
+    logFieldChanges_(perms, 'BULK_SUPERSEDE_RATE', SHEET.RATES, fresh[c.Rate_ID],
+                     wasRow, fresh, HEADERS[SHEET.RATES],
+                     { ref: batchRef, skip: ['Rate_ID'],
+                       summary: scope + ' — supersedes rate #' + it.rateId,
+                       into: auditRows });
   });
 
   if (closed || revised) {
@@ -445,9 +472,15 @@ function applyBulkRateChange_(p, plan, perms) {
   invalidateSheetCache(SHEET.RATES);
 
   appendAmendsBatch_(SHEET.RATES, amends, perms);
+  appendAuditRows_(auditRows);
+  /* The batch summary is written last so it is the newest row in Audit_Log, and
+     so lands at the top of History above the field rows it accounts for. Its
+     Target_ID is the batch reference; every field row carries the same reference
+     as the first token of its Summary, which is what lets one bulk action be
+     collected back together. */
   logAction_(perms, 'BULK_UPDATE_RATES', SHEET.RATES, batchRef,
-    plan.items.length + ' rates, ' + bulkChangeText_(plan) + ', from ' + plan.fromKey +
-    ' — ' + plan.selection);
+    batchRef + ' · ' + plan.items.length + ' rates, ' + bulkChangeText_(plan) + ', from ' +
+    plan.fromKey + ' — ' + plan.selection);
 
   return {
     preview: false, batchRef: batchRef, written: plan.items.length,
