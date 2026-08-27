@@ -1175,12 +1175,7 @@ function renderOutput(){
   const brands=[...new Set(APP.ref.highLevelIds.map(h=>h.Brand))].sort();
   const geos=[...new Set(APP.ref.highLevelIds.map(h=>h.Geo))].sort();
   const f=APP.filters;
-  let rows=APP.output.filter(r=>{
-    if(f.outBrand && r.Brand!==f.outBrand) return false;
-    if(f.outGeo && r.Geo!==f.outGeo) return false;
-    if(f.outType && r.Customer_Type!==f.outType) return false;
-    return true;
-  });
+  const rows=outputVisibleRows();
   const shown=rows.slice(0,800);
   const snapOpts=['(none)'].concat(APP.ref.snapshots)
     .map(s=>'<option'+((APP.config.compareSnapshot||'(none)')===s?' selected':'')+'>'+esc(s)+'</option>').join('');
@@ -1195,6 +1190,8 @@ function renderOutput(){
     '<div class="spacer"></div>'+
     '<div class="field filter"><label>Compare vs</label><select id="snapSel" '+(isEditor()?'':'disabled')+
       ' onchange="changeCompareSnapshot(this.value)">'+snapOpts+'</select></div>'+
+    '<button class="btn" onclick="exportOutputCsv()">Export CSV</button>'+
+    '<button class="btn" onclick="copyOutputCsv()">Copy</button>'+
     (isEditor()?'<button class="btn" onclick="doSnapshot()">Snapshot</button>':'')+
     (isEditor()?'<button class="btn primary" id="recalcBtn" onclick="doRecalc()">Recalculate</button>':'')+
     '</div>'+
@@ -1218,6 +1215,107 @@ function renderOutput(){
     '<div class="note small muted" style="padding:8px 16px">'+rows.length+' rows'+
       (rows.length>shown.length?' (showing first '+shown.length+')':'')+'</div></div>';
 }
+/* ---------------------- output CSV export ----------------------
+   Exports the filtered set, not the rendered slice. The 800-row cap on the table
+   is a rendering concession, and an export that quietly stopped at it would be
+   wrong in exactly the case a CSV is wanted for. */
+function outputVisibleRows(){
+  const f=APP.filters;
+  return APP.output.filter(r=>{
+    if(f.outBrand && r.Brand!==f.outBrand) return false;
+    if(f.outGeo && r.Geo!==f.outGeo) return false;
+    if(f.outType && r.Customer_Type!==f.outType) return false;
+    return true;
+  });
+}
+/* The columns on screen, in the order they appear, plus Compare_Snapshot: on the
+   page that fact lives in the "Compare vs" selector because it is the same for
+   every row, but a bare file with a "Snapshot" column and nothing saying which
+   snapshot is a file you cannot check. */
+const OUTPUT_CSV_COLS = [
+  {key:'High_Level_ID'},
+  {key:'Month', fmt:v=>String(v||'').slice(0,7)},
+  {key:'Customer_Type'}, {key:'Brand'}, {key:'Geo'},
+  {key:'Treatment_Type'}, {key:'WL_Detail'}, {key:'Currency'},
+  {key:'Cost_Local', dp:4}, {key:'Cost_GBP', dp:4},
+  {key:'Compare_Snapshot'},
+  {key:'Snapshot_Cost_Local', dp:4}, {key:'Variance_Local', dp:4}
+];
+function outputCsv(rows){
+  const lines=[OUTPUT_CSV_COLS.map(c=>csvCell(c.key)).join(',')];
+  rows.forEach(r=>{
+    lines.push(OUTPUT_CSV_COLS.map(c=>
+      csvCell(c.fmt ? c.fmt(r[c.key]) : c.dp!==undefined ? num(r[c.key],c.dp) : r[c.key])
+    ).join(','));
+  });
+  return lines.join('\r\n');
+}
+function csvCell(v){
+  const t=(v===null||v===undefined)?'':String(v);
+  return /[",\r\n]/.test(t) ? '"'+t.replace(/"/g,'""')+'"' : t;
+}
+function outputCsvName(n){
+  const f=APP.filters, bits=['packaging-output'];
+  [f.outBrand,f.outGeo,f.outType].forEach(x=>{ if(x) bits.push(String(x).toLowerCase()); });
+  bits.push(n+'rows');
+  return bits.join('-').replace(/[^a-z0-9-]/gi,'')+'.csv';
+}
+function exportOutputCsv(){
+  const rows=outputVisibleRows();
+  if(!rows.length) return showError('Nothing to export — no rows match these filters.');
+  downloadCsv(outputCsvName(rows.length), outputCsv(rows));
+}
+function copyOutputCsv(){
+  const rows=outputVisibleRows();
+  if(!rows.length) return showError('Nothing to copy — no rows match these filters.');
+  copyCsv(outputCsv(rows), rows.length);
+}
+/* Hand the browser a file.
+
+   The portal runs inside an Apps Script iframe, and whether that sandbox permits
+   a download the page starts itself is not something this code can find out — a
+   blocked click fails silently rather than throwing. Hence the Copy button beside
+   it: if nothing lands in your downloads, the same CSV is one click from the
+   clipboard. */
+function downloadCsv(name, text){
+  try{
+    /* A BOM, so Excel opens a UTF-8 CSV without mangling accented names. */
+    const blob=new Blob([String.fromCharCode(0xFEFF)+text],{type:'text/csv;charset=utf-8;'});
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement('a');
+    a.href=url; a.download=name; a.style.display='none';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(()=>{ URL.revokeObjectURL(url); if(a.parentNode) a.parentNode.removeChild(a); },0);
+    showOk('Exported '+name+'. If nothing appeared in your downloads, the iframe blocked it — '+
+           'use Copy instead.');
+  }catch(e){
+    showCsvFallback(text);
+  }
+}
+function copyCsv(text, n){
+  const ok=()=>showOk(n+' row(s) copied as CSV. Paste into a spreadsheet.');
+  try{
+    if(navigator.clipboard && navigator.clipboard.writeText){
+      navigator.clipboard.writeText(text).then(ok, ()=>showCsvFallback(text));
+      return;
+    }
+  }catch(e){}
+  showCsvFallback(text);
+}
+/* Last resort: put it on screen, so it can always be got out by hand. */
+function showCsvFallback(text){
+  modal('CSV',
+    '<p class="muted small" style="margin:0 0 10px">Copying was blocked, so here it is. '+
+    'Select all and copy.</p>'+
+    '<textarea readonly rows="14" style="width:100%;font:inherit;font-family:ui-monospace,'+
+    'SFMono-Regular,Menlo,monospace;font-size:11px;padding:8px;border:1px solid var(--line-2);'+
+    'border-radius:6px">'+esc(text)+'</textarea>',
+    '<button class="btn" onclick="closeModal()">Close</button>', true);
+  const ta=_theModal && _theModal.el.querySelector('textarea');
+  if(ta){ ta.focus(); ta.select(); }
+}
+
 function doRecalc(){
   const b=document.getElementById('recalcBtn');
   b.disabled=true; b.innerHTML='<span class="spinner"></span>Recalculating…';
