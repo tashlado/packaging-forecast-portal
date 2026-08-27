@@ -175,21 +175,45 @@ input.bad{border-color:var(--err);background:#FFF6F7}
 .mix-sum-bad{color:var(--err);font-weight:500;margin-right:12px}
 
 /* ---- multi-select dimension lists (bulk update) ----
-   Named .dimbox, not .checks. The Postage Forecast Portal — whose stylesheet this
-   one is kept in step with — already uses .checks, for a collapsible dropdown.
-   One name over two different components is how a ported style arrives looking
-   like a bug, so this one carries its own name. */
-.dimbox{border:1px solid var(--line-2);border-radius:6px;padding:5px 7px;max-height:128px;
-        overflow:auto;display:flex;flex-direction:column;gap:2px;background:var(--surface)}
-.dimbox label{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--ink-2);
-        cursor:pointer;padding:1px 2px;border-radius:4px;white-space:nowrap}
-.dimbox label:hover{background:var(--bg)}
-.dimbox input[type=checkbox]{width:auto;margin:0;flex:0 0 auto}
-.chead{display:flex;align-items:baseline;gap:8px;margin-bottom:4px}
-.chead .lbl{font-size:11px;color:var(--ink-3);letter-spacing:.04em}
-.chead .lnk{font-size:11px;color:var(--brand);cursor:pointer;background:none;border:none;padding:0}
-.chead .lnk:hover{text-decoration:underline}
-.chead .cnt{margin-left:auto;font-size:11px;color:var(--ink-3)}
+   The same component as the Postage Forecast Portal's .checks, under the same
+   name on purpose: one dropdown, one style, ported rather than forked. Eight of
+   these expanded at once is most of a screen; collapsed, each one says "All 5"
+   or "3 of 5", which is the only thing worth knowing until you open it.
+
+   The panel is position:FIXED, and that is not a preference. .modal is
+   overflow:hidden and .modal .mbody is max-height + overflow:auto, so an
+   absolutely-positioned panel gets clipped by both — it would appear cut off, or
+   force the form to scroll to reveal it, which is the pushing-the-form-around
+   behaviour the dropdown exists to remove. Fixed escapes both clips, at the cost
+   of being placed from script (ckPlace) and re-placed when either scroller moves
+   or the window resizes. */
+.checks{position:relative}
+.checks .cksum{display:flex;align-items:center;gap:8px;width:100%;padding:6px 9px;
+       font:inherit;font-size:13px;color:var(--ink-2);text-align:left;cursor:pointer;
+       background:var(--surface);border:1px solid var(--line-2);border-radius:6px}
+.checks .cksum:hover{border-color:var(--ink-3)}
+.checks .cksum:focus-visible{outline:2px solid var(--brand);outline-offset:-2px}
+.checks.open .cksum{border-color:var(--brand)}
+.checks .cnt{margin-left:auto;font-size:12px;color:var(--ink-3)}
+.checks .chev{font-size:10px;color:var(--ink-3);transition:transform .12s}
+.checks.open .chev{transform:rotate(180deg)}
+.checks .ckpanel{display:none;position:fixed;z-index:110;background:var(--surface);
+       border:1px solid var(--line);border-radius:8px;
+       box-shadow:0 10px 28px rgba(11,11,15,.18)}
+.checks.open .ckpanel{display:block}
+.checks .cacts{display:flex;gap:6px;padding:8px 11px 0}
+.checks .cacts button{font:inherit;font-size:11px;color:var(--brand);padding:2px 8px;
+       border-radius:5px;cursor:pointer;background:none;border:1px solid var(--line)}
+.checks .cacts button:hover{background:var(--brand-tint)}
+.checks .clist{display:flex;flex-wrap:wrap;gap:3px 10px;padding:8px 11px 10px;
+       max-height:164px;overflow:auto}
+.checks .clist label{display:flex;align-items:center;gap:6px;font-size:12px;
+       color:var(--ink-2);cursor:pointer;min-width:calc(50% - 10px)}
+.checks .clist input[type=checkbox]{width:auto;margin:0;flex:none}
+/* Nothing ticked is not a narrower selection, it is a selection that matches
+   nothing — bulkRequest refuses it, so the control says so before you submit. */
+.checks.none .cksum{border-color:var(--err)}
+.checks.none .cnt{color:var(--err)}
 .kv{width:auto} .kv td{padding:4px 0} .kv td+td{padding-left:18px;text-align:right}
 /* A modal's own error slot. showError writes into the screen behind the overlay,
    where a form that stays open would never show you why it refused. */
@@ -464,7 +488,12 @@ function toast(msg, kind){ (kind==='danger'?showError:showOk)(msg); }
 /* ============================= modal ============================= */
 let _theModal=null;
 function closeModal(){
-  if(_theModal && _theModal.el && _theModal.el.parentNode) _theModal.el.parentNode.removeChild(_theModal.el);
+  if(_theModal){
+    /* The resize listener is on window, so it outlives the overlay unless it is
+       taken off here — one leaked listener per modal opened otherwise. */
+    if(_theModal.ckReplace) window.removeEventListener('resize', _theModal.ckReplace);
+    if(_theModal.el && _theModal.el.parentNode) _theModal.el.parentNode.removeChild(_theModal.el);
+  }
   _theModal=null;
   document.onkeydown=null;
 }
@@ -478,9 +507,33 @@ function modal(title, bodyHtml, footHtml, wide){
     '<div class="mbody"><div class="fields">'+bodyHtml+'</div></div>'+
     '<div class="acts">'+(footHtml||'')+'</div></div>';
   document.body.appendChild(back);
-  _theModal={ el:back, hide:closeModal };
-  back.onclick = e => { if(e.target===back) closeModal(); };
-  document.onkeydown = e => { if(e.key==='Escape') closeModal(); };
+  /* A fixed dropdown panel does not travel with the form it belongs to, so it is
+     re-placed when either scroller moves or the window changes size. Cheap, and
+     the alternative — closing on scroll — throws away a half-made selection to a
+     stray trackpad nudge. */
+  const ckReplace = () => back.querySelectorAll('.checks.open').forEach(ckPlace);
+  _theModal={ el:back, hide:closeModal, ckReplace:ckReplace };
+  back.addEventListener('scroll', ckReplace);
+  const mbody = back.querySelector('.mbody');
+  if(mbody) mbody.addEventListener('scroll', ckReplace);
+  window.addEventListener('resize', ckReplace);
+  back.onclick = e => {
+    if(e.target===back) return closeModal();
+    /* A click in the form that is not inside a dropdown shuts the open one, which
+       is what a dropdown is expected to do and the reason the panel needs no
+       scrim of its own. A tick box is inside .checks — the panel is still a DOM
+       child of it, fixed positioning notwithstanding — so ticking a value does
+       not close the list you are ticking it in. */
+    if(!(e.target.closest && e.target.closest('.checks'))) ckCloseAll(back);
+  };
+  document.onkeydown = e => {
+    if(e.key!=='Escape') return;
+    /* Escape shuts an open dropdown first and the modal only when none is open,
+       so it cannot throw away a part-filled bulk change because a panel happened
+       to be showing. */
+    if(ckCloseAll(back)) return;
+    closeModal();
+  };
   const first=back.querySelector('.fields input:not([disabled]), .fields select');
   if(first) first.focus();
   return _theModal;
@@ -667,20 +720,71 @@ function openBulkRates(){
   if(BULKOPTS) return bulkForm();
   run('bulkRateOptions',[],o=>{ BULKOPTS=o; bulkForm(); }, err=>showError(err.message));
 }
-function bulkChecks(d, keep){
+/* A closed control that says "All 5" or "3 of 5", and a floating panel that opens
+   on click. data-dim stays on the group and the values stay ordinary checkboxes
+   inside it, so bulkRead's contract with the server is untouched: fully ticked
+   still leaves as [], anything else as a list. Only the presentation moved. */
+function bulkChecks(d, keep, open){
   const opts=(BULKOPTS[d.key]||[]);
   const prior=keep && keep[d.key];
   const on=v=>!prior || !prior.length || prior.indexOf(v)>=0;
-  return '<div class="field w2" data-dim="'+d.key+'">'+
-    '<div class="chead"><span class="lbl">'+d.label+'</span>'+
-    '<button type="button" class="lnk" onclick="bulkSetAll(\''+d.key+'\',true)">All</button>'+
-    '<button type="button" class="lnk" onclick="bulkSetAll(\''+d.key+'\',false)">None</button>'+
-    '<span class="cnt" id="bcnt_'+d.key+'"></span></div>'+
-    '<div class="dimbox">'+
-    (opts.length?opts.map(v=>'<label><input type="checkbox" value="'+esc(v)+'"'+
-      (on(v)?' checked':'')+' onchange="bulkCount()">'+esc(v)+'</label>').join('')
-     :'<span class="muted small">none defined</span>')+
-    '</div></div>';
+  const nOn=opts.filter(on).length;
+  return '<div class="field w2">'+
+    '<div class="checks'+(open?' open':'')+'" data-dim="'+d.key+'">'+
+    '<button type="button" class="cksum" aria-expanded="'+(open?'true':'false')+'" '+
+      'onclick="bulkToggle(\''+d.key+'\')">'+
+      '<span>'+esc(d.label)+'</span>'+
+      '<span class="cnt" id="bcnt_'+d.key+'">'+
+        (nOn===opts.length?'All '+opts.length:nOn+' of '+opts.length)+'</span>'+
+      '<span class="chev">&#9662;</span></button>'+
+    '<div class="ckpanel">'+
+      '<div class="cacts">'+
+        '<button type="button" onclick="bulkSetAll(\''+d.key+'\',true)">All</button>'+
+        '<button type="button" onclick="bulkSetAll(\''+d.key+'\',false)">None</button></div>'+
+      '<div class="clist">'+
+      (opts.length?opts.map(v=>'<label><input type="checkbox" value="'+esc(v)+'"'+
+        (on(v)?' checked':'')+' onchange="bulkCount()">'+esc(v)+'</label>').join('')
+       :'<span class="muted small">none defined</span>')+
+      '</div></div></div></div>';
+}
+/* Put an open panel where its control is, in viewport coordinates — needed
+   because the panel is position:fixed to escape the form's two clips. Flips above
+   the control when there is more room there, so the last dimension in a scrolled
+   form does not open into nothing. */
+function ckPlace(group){
+  const btn=group.querySelector('.cksum'), panel=group.querySelector('.ckpanel');
+  if(!btn||!panel) return;
+  const r=btn.getBoundingClientRect();
+  panel.style.width=r.width+'px';
+  panel.style.left=r.left+'px';
+  /* Measured after .open is set, so offsetHeight is the height it will render at. */
+  const ph=panel.offsetHeight, room=window.innerHeight-r.bottom-8;
+  panel.style.top=(ph>room && r.top-8>room ? r.top-ph-4 : r.bottom+4)+'px';
+}
+/* Shut every open dropdown under root. Returns whether it shut anything, so
+   Escape can tell "closed a panel" from "nothing was open". */
+function ckCloseAll(root, except){
+  let shut=false;
+  root.querySelectorAll('.checks.open').forEach(g=>{
+    if(g===except) return;
+    g.classList.remove('open');
+    const b=g.querySelector('.cksum');
+    if(b) b.setAttribute('aria-expanded','false');
+    shut=true;
+  });
+  return shut;
+}
+/* One panel open at a time: two floating over each other is a stack of tick boxes
+   with no way to tell which dimension you are narrowing. */
+function bulkToggle(key){
+  const back=_theModal && _theModal.el; if(!back) return;
+  const group=back.querySelector('.checks[data-dim="'+key+'"]'); if(!group) return;
+  const wasOpen=group.classList.contains('open');
+  ckCloseAll(back, group);
+  group.classList.toggle('open', !wasOpen);
+  const btn=group.querySelector('.cksum');
+  if(btn) btn.setAttribute('aria-expanded', wasOpen?'false':'true');
+  if(!wasOpen) ckPlace(group);
 }
 function bulkSetAll(key, state){
   document.querySelectorAll('[data-dim="'+key+'"] input[type=checkbox]')
@@ -690,10 +794,11 @@ function bulkSetAll(key, state){
 function bulkCount(){
   BULK_DIMS.forEach(d=>{
     const el=document.getElementById('bcnt_'+d.key); if(!el) return;
+    const group=el.closest('.checks');
     const all=document.querySelectorAll('[data-dim="'+d.key+'"] input[type=checkbox]');
     const on=Array.from(all).filter(cb=>cb.checked).length;
-    el.textContent = on===all.length ? 'all' : on+'/'+all.length;
-    el.style.color = on===0 ? 'var(--err)' : '';
+    el.textContent = on===all.length ? 'All '+all.length : on+' of '+all.length;
+    if(group) group.classList.toggle('none', all.length>0 && on===0);
   });
 }
 /* Fully ticked → [] ("all"); nothing ticked → null, which the caller rejects. */
@@ -708,8 +813,13 @@ function bulkForm(keep){
   const k=keep||{};
   const today=new Date().toISOString().slice(0,10);
   const from=k.fromDate || (today>APP.config.horizonStart?today:APP.config.horizonStart);
-  /* The change first, the scope second: what you are doing belongs above the fold,
-     and the eight dimension lists are tall enough to push it off on their own. */
+  /* Coming back from a preview, one narrowed dimension opens itself — the one the
+     user is most likely to be adjusting. Only the first: eight panels floating at
+     once is the wall of tick boxes the dropdown replaced, and every closed control
+     already reads "3 of 5" without being opened. */
+  const narrowed=BULK_DIMS.filter(d=>k[d.key] && k[d.key].length).map(d=>d.key);
+  const openKey=narrowed.length?narrowed[0]:null;
+  /* The change first, the scope second: what you are doing belongs above the fold. */
   modal('Bulk update rates',
     '<div class="merr" id="bkErr" style="display:none"></div>'+
     '<div class="fgrid">'+
@@ -725,11 +835,14 @@ function bulkForm(keep){
     '</div>'+
     '<div class="fsplit">Which rates<span>every rate matching all eight moves — fully ticked '+
       'means no narrowing on that dimension</span></div>'+
-    '<div class="fgrid">'+BULK_DIMS.map(d=>bulkChecks(d,k)).join('')+'</div>',
+    '<div class="fgrid">'+BULK_DIMS.map(d=>bulkChecks(d,k,openKey===d.key)).join('')+'</div>',
     '<button class="btn" onclick="closeModal()">Cancel</button>'+
     '<button class="btn primary" id="bkPrev" onclick="bulkPreview()">Preview</button>',
     true);
   bulkCount();
+  /* A panel rendered .open still has no position — it is fixed, so nothing places
+     it but ckPlace, and it can only be measured once it is in the document. */
+  if(_theModal) _theModal.el.querySelectorAll('.checks.open').forEach(ckPlace);
 }
 /* The bulk form stays open when it refuses, so its complaint has to be inside it. */
 function bulkFail(msg){
