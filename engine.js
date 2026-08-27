@@ -21,17 +21,39 @@ function utcDay_(d) { return Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()
 
 function recalculate() {
   prewarmForWrite_([SHEET.RATES, SHEET.COMP_MIX, SHEET.CC_MIX, SHEET.FX,
-                    SHEET.MODELLING, SHEET.OUTPUT, SHEET.SNAPSHOTS]);
+                    SHEET.MODELLING, SHEET.OUTPUT, SHEET.SNAPSHOTS, SHEET.VALIDATION]);
   const perms = requireEditor();
   const t0 = Date.now();
   const result = withLock(() => {
     const computed = computeAll_();
+
+    /* The validation gate. It runs on what has just been computed and before any
+       of it is written, so an ERROR — a line whose mix ships a component nothing
+       prices, a split that does not total 100% — leaves Modelling and Output
+       holding the last good numbers instead of being overwritten with wrong ones.
+       A wrong forecast that looks freshly calculated is worse than a stale one
+       that says so.
+
+       Findings are written to Validation_Results either way. Set the Config key
+       VALIDATION_BLOCKS_RECALC to FALSE to publish over the top of them; anything
+       else, absence included, blocks — the gate has to be lifted deliberately. */
+    const check = validateForRecalc_(computed);
+    if (check.blocked) {
+      return { blocked: true, validation: check,
+               lines: computed.lineCount, months: computed.months.length };
+    }
+
     writeModelling_(computed);
     writeOutput_(computed);
     const stamp = Utilities.formatDate(new Date(), Session.getScriptTimeZone() || 'Europe/London', 'dd MMM yyyy HH:mm');
     setConfig_('LAST_RECALC', stamp + ' by ' + perms.portalName);
-    return { lines: computed.lineCount, months: computed.months.length, outputRows: computed.outputRows.length, lastRecalc: stamp + ' by ' + perms.portalName };
+    return { blocked: false, validation: check, lines: computed.lineCount, months: computed.months.length, outputRows: computed.outputRows.length, lastRecalc: stamp + ' by ' + perms.portalName };
   });
+  if (result.blocked) {
+    logAction_(perms, 'RECALCULATE_BLOCKED', SHEET.OUTPUT, '',
+      result.validation.counts.ERROR + ' validation error(s) — Modelling and Output left unchanged');
+    return result;
+  }
   logAction_(perms, 'RECALCULATE', SHEET.OUTPUT, '', result.lines + ' lines × ' + result.months + ' months in ' + (Date.now() - t0) + 'ms');
   return result;
 }

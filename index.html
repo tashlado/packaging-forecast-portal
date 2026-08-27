@@ -72,6 +72,7 @@ nav.scrolls{overflow-x:auto}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
 .badge{background:var(--brand-tint);color:var(--brand-lo);border-radius:10px;padding:1px 8px;font-size:11px}
 .badge.amber{background:#FFF4E0;color:var(--warn)}
+.badge.err{background:#FDEBED;color:var(--err)}
 .badge.green{background:#E7F5EF;color:var(--ok)}
 
 /* ---- layout ---- */
@@ -233,9 +234,10 @@ input.bad{border-color:var(--err);background:#FFF6F7}
 /* ============================ state ============================ */
 const APP = {
   user:null, ref:null, config:null,
-  rates:[], compMix:[], ccMix:[], fx:[], output:[], audit:[], completeness:null,
+  rates:[], compMix:[], ccMix:[], fx:[], output:[], audit:[], validation:[], completeness:null,
   loadState:'loading', activeTab:'dashboard',
-  filters:{ rateBrand:'', rateGeo:'', rateSearch:'', outBrand:'', outGeo:'', outType:'' }
+  filters:{ rateBrand:'', rateGeo:'', rateSearch:'', outBrand:'', outGeo:'', outType:'',
+            valSeverity:'', valRule:'' }
 };
 const TABS = [
   {id:'dashboard', label:'Dashboard'},
@@ -243,6 +245,7 @@ const TABS = [
   {id:'compmix',   label:'Component Mix'},
   {id:'ccmix',     label:'Cold Chain'},
   {id:'output',    label:'Output'},
+  {id:'validation',label:'Validation'},
   {id:'dims',      label:'Lookups', admin:true},
   {id:'history',   label:'History', admin:true}
 ];
@@ -319,7 +322,8 @@ window.onload = function(){
     switchTab('dashboard');
     run('loadAllAppData', [], d2 => {
       Object.assign(APP, {rates:d2.rates, compMix:d2.compMix, ccMix:d2.ccMix, fx:d2.fx,
-                          output:d2.output, completeness:d2.completeness, config:d2.config});
+                          output:d2.output, validation:d2.validation||[],
+                          completeness:d2.completeness, config:d2.config});
       if(d2.audit) APP.audit=d2.audit;
       APP.loadState='ready';
       renderActive(); renderStatusChip();
@@ -416,7 +420,8 @@ window.addEventListener('resize', () => {
 
 function renderActive(){
   const r={dashboard:renderDashboard, rates:renderRates, compmix:renderCompMix,
-           ccmix:renderCCMix, output:renderOutput, dims:renderDims, history:renderHistory};
+           ccmix:renderCCMix, output:renderOutput, validation:renderValidation,
+           dims:renderDims, history:renderHistory};
   (r[APP.activeTab]||function(){})();
 }
 function pane(id){ return document.getElementById('pane-'+id); }
@@ -521,6 +526,7 @@ function renderDashboard(){
     '<div class="card"><div class="body"><div class="small muted">Comparing against snapshot</div>'+
       '<div class="stat sm">'+esc(APP.config.compareSnapshot||'—')+'</div></div></div>'+
     '</div>'+
+    validationSummaryCard()+
     '<div class="card"><h2>Completeness checks</h2>'+
     '<div class="tablewrap"><table><thead><tr><th>Line</th><th>Description</th><th>Missing</th></tr></thead>'+
     '<tbody>'+gapsHtml+'</tbody></table></div></div>';
@@ -1103,12 +1109,43 @@ function doRecalc(){
   const b=document.getElementById('recalcBtn');
   b.disabled=true; b.innerHTML='<span class="spinner"></span>Recalculating…';
   run('recalculate',[], resp=>{
+    /* A refusal is a successful call that wrote nothing, not a failure. It has to
+       land somewhere the user cannot walk past, because the numbers on screen are
+       still the old ones and nothing else on the page would say so. */
+    if(resp.blocked){ recalcBlocked(resp); return; }
     showOk('Recalculated '+resp.lines+' lines × '+resp.months+' months');
-    run('loadAllAppData',[],d2=>{
-      Object.assign(APP,{output:d2.output, config:d2.config, completeness:d2.completeness});
-      renderActive(); renderStatusChip();
-    });
+    refreshAfterRecalc();
   }, err=>{ b.disabled=false; b.textContent='Recalculate'; showError(err.message); }, true);
+}
+function refreshAfterRecalc(){
+  run('loadAllAppData',[],d2=>{
+    Object.assign(APP,{output:d2.output, validation:d2.validation||[],
+                       config:d2.config, completeness:d2.completeness});
+    renderActive(); renderStatusChip();
+  });
+}
+function recalcBlocked(resp){
+  const val=resp.validation||{counts:{ERROR:0,WARN:0,INFO:0}, findings:[]};
+  const errs=(val.findings||[]).filter(f=>String(f.severity).toUpperCase()==='ERROR');
+  modal('Recalculation stopped — '+val.counts.ERROR+' error(s)',
+    '<div class="err-box" style="margin:0 0 14px">Nothing was written. Modelling and Output still '+
+    'hold the numbers from the last good recalculation.</div>'+
+    '<p class="muted small" style="margin:0 0 12px">These are the checks that say the forecast '+
+    'would be wrong — a component that ships with nothing to price it, or a split that does not '+
+    'total 100%. Fix them and run again. If the forecast is genuinely meant to publish over the '+
+    'top of them, set the Config key <b>VALIDATION_BLOCKS_RECALC</b> to <b>FALSE</b>.</p>'+
+    '<div class="tablewrap"><table><thead><tr><th>Rule</th><th>Line</th><th>What was found</th>'+
+    '</tr></thead><tbody>'+
+    errs.slice(0,25).map(f=>'<tr><td>'+esc(f.rule)+'</td><td class="num">'+esc(f.modellingId)+'</td>'+
+      '<td>'+esc(f.message)+'</td></tr>').join('')+
+    '</tbody></table></div>'+
+    (errs.length>25?'<div class="hint">Showing 25 of '+errs.length+'.</div>':'')+
+    (val.counts.WARN?'<div class="hint" style="margin-top:10px">'+val.counts.WARN+
+      ' warning(s) were also raised — they do not block anything.</div>':''),
+    '<button class="btn" onclick="closeModal()">Close</button>'+
+    '<button class="btn primary" onclick="closeModal();switchTab(\'validation\')">Open Validation</button>',
+    true);
+  refreshAfterRecalc();
 }
 function doSnapshot(){
   const name=prompt('Name this snapshot (e.g. "RFQ4 2026 final"):');
@@ -1125,6 +1162,123 @@ function changeCompareSnapshot(name){
     APP.config.compareSnapshot=resp.compareSnapshot;
     showOk('Comparison set to '+(clean||'none')+' — hit Recalculate to refresh the variance columns');
   }, null, true);
+}
+
+
+/* ========================== validation ==========================
+   The rule pack's findings, read from the Validation_Results tab. Re-running
+   recomputes them server side; the counts here are only ever as fresh as the
+   last run, which is why the last-run stamp sits beside them rather than being
+   left to be inferred from an empty table. */
+const SEV_ORDER = {ERROR:0, WARN:1, INFO:2};
+function validationCounts(){
+  const c={ERROR:0, WARN:0, INFO:0};
+  (APP.validation||[]).forEach(r=>{
+    const sev=String(r.Severity||'').toUpperCase();
+    if(c[sev]!==undefined) c[sev]++;
+  });
+  return c;
+}
+function sevBadge(sev){
+  const s=String(sev||'').toUpperCase();
+  const cls = s==='ERROR' ? 'badge err' : s==='WARN' ? 'badge amber' : 'badge';
+  return '<span class="'+cls+'">'+esc(s||'—')+'</span>';
+}
+/* Ranks the whole line, not just the number: an ERROR count of zero is the good
+   news the dashboard exists to give, and dressing it in red would bury it. */
+function validationSummaryCard(){
+  const c=validationCounts();
+  const ran=APP.config.lastValidation||'';
+  const stat=(label,n,cls)=>
+    '<div style="min-width:96px"><div class="small muted">'+label+'</div>'+
+    '<div class="stat num'+(cls?' '+cls:'')+'">'+n+'</div></div>';
+  let note='';
+  if(!ran){
+    note='<div class="note small muted" style="padding:10px 0 0">Validation has not been run yet — '+
+         'open the Validation tab and hit Re-run.</div>';
+  } else if(c.ERROR && APP.config.validationBlocksRecalc){
+    note='<div class="warn-box" style="margin:12px 0 0">'+c.ERROR+' error(s) are blocking '+
+         'recalculation — Output keeps the last good numbers until they are fixed.</div>';
+  } else if(c.ERROR){
+    note='<div class="warn-box" style="margin:12px 0 0">'+c.ERROR+' error(s) outstanding. '+
+         'VALIDATION_BLOCKS_RECALC is set to FALSE, so recalculation writes anyway.</div>';
+  }
+  return '<div class="card"><h2>Validation'+
+    '<span class="act"><button class="btn sm" onclick="switchTab(\'validation\')">Open</button></span></h2>'+
+    '<div class="body"><div class="row tight" style="gap:28px;align-items:flex-start">'+
+    stat('Errors', c.ERROR, c.ERROR?'up':'')+
+    stat('Warnings', c.WARN)+
+    stat('Notes', c.INFO)+
+    '<div class="spacer"></div>'+
+    '<div><div class="small muted">Last run</div>'+
+      '<div class="stat sm">'+esc(ran||'Never')+'</div></div>'+
+    '</div>'+note+'</div></div>';
+}
+
+function renderValidation(){
+  if(notReady('validation')) return;
+  const c=validationCounts();
+  const f=APP.filters;
+  const all=(APP.validation||[]).slice().sort((a,b)=>
+    (SEV_ORDER[String(a.Severity).toUpperCase()]||3)-(SEV_ORDER[String(b.Severity).toUpperCase()]||3) ||
+    String(a.Rule_Code).localeCompare(String(b.Rule_Code)));
+  const rules=[...new Set(all.map(r=>String(r.Rule_Code)).filter(Boolean))].sort();
+  let rows=all;
+  if(f.valSeverity) rows=rows.filter(r=>String(r.Severity).toUpperCase()===f.valSeverity);
+  if(f.valRule) rows=rows.filter(r=>String(r.Rule_Code)===f.valRule);
+  const shown=rows.slice(0,600);
+
+  pane('validation').innerHTML=
+    '<div class="card"><div class="body"><div class="row tight">'+
+    '<div class="field filter"><label>Severity</label>'+
+      '<select onchange="APP.filters.valSeverity=this.value;renderValidation()">'+
+      '<option value="">All severities</option>'+selOptions(f.valSeverity,['ERROR','WARN','INFO'])+
+      '</select></div>'+
+    '<div class="field filter"><label>Rule</label>'+
+      '<select onchange="APP.filters.valRule=this.value;renderValidation()">'+
+      '<option value="">All rules</option>'+selOptions(f.valRule,rules)+'</select></div>'+
+    '<div class="spacer"></div>'+
+    '<div class="field filter"><label>Counts</label><div style="padding-top:5px">'+
+      sevBadge('ERROR')+' '+c.ERROR+' &nbsp; '+sevBadge('WARN')+' '+c.WARN+
+      ' &nbsp; '+sevBadge('INFO')+' '+c.INFO+'</div></div>'+
+    (isEditor()?'<button class="btn primary" id="valRunBtn" onclick="doValidate()">Re-run</button>':'')+
+    '</div>'+
+    '<div class="hint">Last run: '+esc(APP.config.lastValidation||'never')+
+      ' — errors block Recalculate unless the Config key VALIDATION_BLOCKS_RECALC is set to FALSE.</div>'+
+    '</div></div>'+
+    '<div class="card"><div class="tablewrap"><table><thead><tr>'+
+    '<th>Severity</th><th>Rule</th><th>HL</th><th>Line</th><th>Month</th><th>What was found</th>'+
+    '</tr></thead><tbody>'+
+    (shown.length?shown.map(r=>'<tr>'+
+      '<td>'+sevBadge(r.Severity)+'</td><td>'+esc(r.Rule_Code)+'</td>'+
+      '<td class="num">'+esc(r.High_Level_ID)+'</td><td class="num">'+esc(r.Modelling_ID)+'</td>'+
+      '<td>'+esc(String(r.Month||'').slice(0,7))+'</td>'+
+      '<td>'+esc(r.Message)+'</td></tr>').join('')
+     :'<tr><td colspan="6" class="muted">'+
+        (APP.config.lastValidation
+          ? (all.length?'Nothing matches these filters.':'No problems found at the last run.')
+          : 'Validation has not been run yet.')+
+      '</td></tr>')+
+    '</tbody></table></div>'+
+    '<div class="note small muted" style="padding:8px 16px">'+rows.length+' finding(s)'+
+      (rows.length>shown.length?' (showing first '+shown.length+')':'')+
+      ' — the full set is on the Validation_Results tab of the Google Sheet.</div></div>';
+}
+
+function doValidate(){
+  const b=document.getElementById('valRunBtn');
+  if(b){ b.disabled=true; b.innerHTML='<span class="spinner"></span>Checking…'; }
+  run('runValidation',[], rep=>{
+    showOk('Validation '+rep.status+' — '+rep.counts.ERROR+' error(s), '+rep.counts.WARN+
+           ' warning(s), '+rep.counts.INFO+' note(s).');
+    run('loadAllAppData',[],d2=>{
+      Object.assign(APP,{validation:d2.validation||[], config:d2.config});
+      renderActive(); renderStatusChip();
+    });
+  }, err=>{
+    if(b){ b.disabled=false; b.textContent='Re-run'; }
+    showError(err.message);
+  }, true);
 }
 
 /* ========================== lookups ========================== */

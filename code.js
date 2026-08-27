@@ -33,7 +33,9 @@ function publicConfig_() {
     horizonStart: dayStr(normDate(cfg.HORIZON_START)),
     horizonEnd:   dayStr(normDate(cfg.HORIZON_END)),
     compareSnapshot: safeStr(cfg.COMPARE_SNAPSHOT),
-    lastRecalc: safeStr(cfg.LAST_RECALC)
+    lastRecalc: safeStr(cfg.LAST_RECALC),
+    lastValidation: safeStr(cfg.LAST_VALIDATION),
+    validationBlocksRecalc: safeStr(cfg.VALIDATION_BLOCKS_RECALC).toUpperCase() !== 'FALSE'
   };
 }
 
@@ -83,7 +85,8 @@ function tableToObjects_(sheetName) {
 /* Phase 2 — everything else in one round-trip. */
 function loadAllAppData() {
   prewarmSheetCache_([SHEET.RATES, SHEET.COMP_MIX, SHEET.CC_MIX, SHEET.FX, SHEET.OUTPUT, SHEET.SNAPSHOTS, SHEET.AUDIT,
-                      SHEET.PERMISSIONS, SHEET.AREAS, SHEET.HL, SHEET.COMPONENTS, SHEET.LINES, SHEET.CONFIG]);
+                      SHEET.PERMISSIONS, SHEET.AREAS, SHEET.HL, SHEET.COMPONENTS, SHEET.LINES, SHEET.CONFIG,
+                      SHEET.VALIDATION]);
   const perms = requireViewer();
   const payload = {
     rates:    tableToObjects_(SHEET.RATES),
@@ -91,6 +94,7 @@ function loadAllAppData() {
     ccMix:    tableToObjects_(SHEET.CC_MIX),
     fx:       tableToObjects_(SHEET.FX),
     output:   tableToObjects_(SHEET.OUTPUT),
+    validation: validationRows_(),
     completeness: computeCompleteness_(),
     config:   publicConfig_()
   };
@@ -99,6 +103,19 @@ function loadAllAppData() {
     payload.audit = audit.slice(Math.max(0, audit.length - 300)).reverse();
   }
   return payload;
+}
+
+/* Validation_Results arrived after the first release, so a spreadsheet whose owner
+   has not re-run verifySetup() since will not have the tab yet. Missing means
+   "nothing has been validated", not "the portal is broken" — the whole two-phase
+   load should not fail over a tab that one editor menu click creates. */
+function validationRows_() {
+  try {
+    return tableToObjects_(SHEET.VALIDATION);
+  } catch (err) {
+    Logger.log('Validation_Results unavailable: ' + err.message);
+    return [];
+  }
 }
 
 /* Dashboard completeness: per active line, does it have any rates / any mix,

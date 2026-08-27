@@ -21,6 +21,7 @@ const SHEET = {
   OUTPUT:       'Output',
   SNAPSHOTS:    'Forecast_Snapshots',
   PARITY:       'Parity_Expected',
+  VALIDATION:   'Validation_Results',
   RATES_AM:     'Rate_Card_Amends',
   COMP_MIX_AM:  'Component_Mix_Amends',
   CC_MIX_AM:    'Cold_Chain_Mix_Amends',
@@ -43,7 +44,8 @@ const HEADERS = {
   'Modelling':           ['Modelling_ID','High_Level_ID','Month','CC_Mix_Applied','Component_Mix_Applied','New','Repeat','OTC'],
   'Output':              ['High_Level_ID','Month','Customer_Type','Brand','Geo','Treatment_Type','WL_Detail','Currency','Cost_Local','FX_to_GBP','Cost_GBP','Compare_Snapshot','Snapshot_Cost_Local','Variance_Local'],
   'Forecast_Snapshots':  ['Snapshot_Name','Created_At','Created_By','High_Level_ID','Month','Customer_Type','Cost_Local'],
-  'Parity_Expected':     ['High_Level_ID','Month','Customer_Type','Expected_Cost_Local']
+  'Parity_Expected':     ['High_Level_ID','Month','Customer_Type','Expected_Cost_Local'],
+  'Validation_Results':  ['Result_ID','Run_At','Rule_Code','Severity','High_Level_ID','Modelling_ID','Month','Message']
 };
 // Amends tables mirror their source, prefixed with the amend columns.
 const AMEND_PREFIX = ['Amend_ID','Amend_Type','Amend_Timestamp','Amend_Email','Amend_Name'];
