@@ -173,6 +173,28 @@ function appendAmend_(srcSheetName, amendType, rowValues, perms) {
               .concat(rowValues);
   sh.appendRow(row);
 }
+/* Many amend rows in one write.
+   appendAmend_ costs an appendRow per row, which a bulk change makes hundreds of.
+   Same rows, same columns — one setValues instead. entries: [{type, rowValues}]. */
+function appendAmendsBatch_(srcSheetName, entries, perms) {
+  if (!entries || !entries.length) return 0;
+  const amSheetName = srcSheetName + '_Amends';
+  const sh = getSheet(amSheetName);
+  const now = new Date();
+  const width = HEADERS[amSheetName].length;
+  const rows = entries.map(e =>
+    padTo_([getNextId(amSheetName, 'Amend_ID'), e.type, now, perms.email, perms.portalName]
+           .concat(e.rowValues), width));
+  sh.getRange(sh.getLastRow() + 1, 1, rows.length, width).setValues(rows);
+  return rows.length;
+}
+/* Rows read through prewarmSheetCache_ come back with trailing empties dropped,
+   so anything written back has to be padded to the table's full width. */
+function padTo_(row, width) {
+  const out = (row || []).slice(0, width);
+  while (out.length < width) out.push('');
+  return out;
+}
 function appendDimAmend_(tableName, amendType, rowId, rowObj, perms) {
   const sh = getSheet(SHEET.DIM_AM);
   sh.appendRow([getNextId(SHEET.DIM_AM, 'Amend_ID'), amendType, new Date(), perms.email, perms.portalName,
