@@ -611,7 +611,7 @@ by. Buried inside one "Line" label they could only be matched as free text and n
 
 **The Output screen is a reading view, and deliberately thin.** One control above the table —
 Export CSV — and nine of Output's fourteen columns: High Level ID, Date ID, Brand, Geo,
-Treatment Type, Detail, Customer Type, Date, Cost. Recalculate and Snapshot are in the header,
+Treatment Type, Detail, Customer Type, Month, Cost. Recalculate and Snapshot are in the header,
 the variance baseline is on the Snapshots screen, and `tToolbar`'s row count and
 "Clear filters & sort" are gone with them. Four things to know before changing it:
 
@@ -625,16 +625,23 @@ the variance baseline is on the Snapshots screen, and `tToolbar`'s row count and
   where postage is GBP-only, and a column of bare numbers mixing GBP with USD is a number
   nobody can read. `Cost_Local` keeps `type:'num'`, so the `cell` renderer changes what is
   shown without touching how it sorts.
-- **Six filters, all `pick`**: Brand, Geo, Treatment Type, Detail, Customer Type, Date. An id
-  and a cost are things you sort, not things you pick from a list. `Detail` is `WL_Detail`
-  (postage calls the same dimension WL Split); `Date` is `Month`, normalised to `yyyy-mm`
-  so the pick list offers one entry per month.
+- **Six filters, all `pick`**: Brand, Geo, Treatment Type, Detail, Customer Type, Month. An
+  id and a cost are things you sort, not things you pick from a list. `Detail` is `WL_Detail`
+  (postage calls the same dimension WL Split); the `Month` column is normalised to `yyyy-mm`
+  so the pick list offers one entry per month, and is labelled for what it holds — a month,
+  not a date, even though postage's equivalent column is called Date.
 - **The CSV is the record, the table is the view.** `OUTPUT_CSV_COLS` still exports all
   fourteen stored columns including `Cost_GBP` and the variance ones. An export that mirrored
-  the table would drop exactly what downstream extracts are taken for. Export CSV is a single
-  button, and **shift-click** puts the CSV on screen instead of downloading it — the escape
-  hatch that the removed Copy button used to be, kept because `downloadCsv` cannot tell when
-  the iframe has swallowed a download and its toast is the only place it is documented.
+  the table would drop exactly what downstream extracts are taken for.
+- **Export CSV downloads, and does nothing else** — single-purpose by request. Know what that
+  costs before adding to it: `downloadCsv` catches a download that *throws* and puts the CSV
+  on screen instead, but the Apps Script iframe can also swallow the click without throwing,
+  and there is no way to detect that. In that case the person gets a green "Exported…" box and
+  an empty Downloads folder, with no way to get the filtered rows out of the portal. The toast
+  names the failure and points at the Google Sheet, which holds the same rows unfiltered; that
+  is the whole mitigation. A Copy button and then a shift-click hatch both used to cover this
+  and were removed deliberately — if it starts biting, restore a second way out rather than
+  trying to detect the block.
 
 - `modal(title, body, footer, wide)` builds the overlay and returns `{hide}`; `closeModal()`
   dismisses it. `mfield`/`mselect`/`mselectRaw`/`modalActs` build the 4-column field grid — span

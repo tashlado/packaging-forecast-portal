@@ -1542,7 +1542,7 @@ const OUTPUT_COLS = [
   {key:'Treatment_Type', label:'Treatment Type', type:'str', filter:'pick'},
   {key:'WL_Detail',      label:'Detail',         type:'str', filter:'pick'},
   {key:'Customer_Type',  label:'Customer Type',  type:'str', filter:'pick'},
-  {key:'Month',          label:'Date',           type:'str', filter:'pick'},
+  {key:'Month',          label:'Month',          type:'str', filter:'pick'},
   {key:'Cost_Local',     label:'Cost',           type:'num', filter:null, right:true, dp:4,
    hint:'Blended packaging cost per order for this segment that month, in the segment currency',
    /* The currency rides in the cell rather than in a column of its own: the
@@ -1595,7 +1595,7 @@ function renderOutput(){
 
        Recalculate, Snapshot   the header, reachable from every tab
        Compare vs (baseline)   the Snapshots screen, with the snapshots it picks between
-       Copy                    folded into Export CSV as shift-click — see below
+       Copy                    removed; Export CSV downloads and does nothing else
        Last recalc             the header status chip, which already carries it in its tooltip
 
      The row count and "Clear filters & sort" that tToolbar drew go with them. The
@@ -1604,7 +1604,7 @@ function renderOutput(){
   pane('output').innerHTML=
     '<div class="card"><div class="body"><div class="row tight">'+
     '<div class="spacer"></div>'+
-    '<button class="btn" onclick="exportOutputCsv(event)">Export CSV</button>'+
+    '<button class="btn" onclick="exportOutputCsv()">Export CSV</button>'+
     '</div></div></div>'+
     '<div class="card"><div class="tablewrap"><table>'+
     tHead('output', OUTPUT_COLS, all)+
@@ -1662,26 +1662,27 @@ function outputCsvName(n){
   bits.push(n+'rows');
   return bits.join('-').replace(/[^a-z0-9-]/gi,'')+'.csv';
 }
-function exportOutputCsv(ev){
+function exportOutputCsv(){
   const rows=outputVisibleRows();
   if(!rows.length) return showError('Nothing to export — no rows match these filters.');
-  const text=outputCsv(rows);
-  /* Shift-click puts the CSV on screen instead of downloading it. There used to be
-     a Copy button beside this one for that job; the toolbar is one control now, and
-     a download this page starts can be swallowed by the iframe without saying so
-     (see downloadCsv), so the way out had to survive as something. A modifier costs
-     no room, and the toast after every export names it — which is the only place
-     anybody would need to learn it, because it is the only place it comes up. */
-  if(ev && ev.shiftKey) return showCsvFallback(text);
-  downloadCsv(outputCsvName(rows.length), text);
+  downloadCsv(outputCsvName(rows.length), outputCsv(rows));
 }
 /* Hand the browser a file.
 
-   The portal runs inside an Apps Script iframe, and whether that sandbox permits
-   a download the page starts itself is not something this code can find out — a
-   blocked click fails silently rather than throwing. Hence the shift-click escape
-   hatch on Export CSV: if nothing lands in your downloads, the same CSV goes on
-   screen to be copied by hand. The toast below is what tells you it exists. */
+   Two ways this can fail, and only one of them is caught.
+
+   If the download machinery throws — no Blob, no createObjectURL, a sandbox that
+   refuses outright — the catch puts the CSV on screen instead, and the person
+   still gets their data.
+
+   If the Apps Script iframe simply SWALLOWS the click, nothing throws. There is
+   no signal to test: the code has handed the browser a file and the browser has
+   quietly declined it. Export CSV is a single-purpose button by request, so
+   there is no fallback for that case, and the toast below is the whole of the
+   mitigation — it names the failure so somebody seeing an empty Downloads folder
+   knows it is not their imagination, and points at the Google Sheet, which
+   carries the same rows unfiltered. If this turns out to bite, the fix is to
+   detect nothing (you cannot) or to bring back a second way out. */
 function downloadCsv(name, text){
   try{
     /* A BOM, so Excel opens a UTF-8 CSV without mangling accented names. */
@@ -1692,8 +1693,8 @@ function downloadCsv(name, text){
     document.body.appendChild(a);
     a.click();
     setTimeout(()=>{ URL.revokeObjectURL(url); if(a.parentNode) a.parentNode.removeChild(a); },0);
-    showOk('Exported '+name+'. If nothing appeared in your downloads, the iframe blocked it — '+
-           'shift-click Export CSV to put the text on screen instead.');
+    showOk('Exported '+name+'. If nothing appeared in your downloads, the browser blocked it — '+
+           'the Output tab of the Google Sheet has the same rows.');
   }catch(e){
     showCsvFallback(text);
   }
