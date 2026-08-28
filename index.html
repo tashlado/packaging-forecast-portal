@@ -58,6 +58,7 @@ nav.scrolls{overflow-x:auto}
        color:var(--ink-2);white-space:nowrap}
 .navmenu button:hover{background:var(--bg);color:var(--ink)}
 .navmenu button.on{color:var(--ink);font-weight:500;background:var(--brand-tint)}
+.hactions{display:flex;align-items:center;gap:6px}
 .hright{display:flex;align-items:center;gap:10px;font-size:12px;color:var(--ink-3);white-space:nowrap}
 /* One chip, never two: a write in flight or a failed write wins over the resting
    recalculation state, because it is the more urgent and the more perishable. */
@@ -276,6 +277,7 @@ input.bad{border-color:var(--err);background:#FFF6F7}
       <button id="navMoreBtn" aria-haspopup="true" aria-expanded="false">More</button>
       <div class="navmenu" id="navMenu" hidden></div>
     </div>
+    <div id="hactions" class="hactions"></div>
     <div class="hright">
       <span class="chip" id="status">Loading</span>
       <span id="who"></span>
@@ -385,7 +387,7 @@ window.onload = function(){
     const av=document.getElementById('whoAvatar');
     av.textContent=initialsOf(d.user.portalName);
     av.title=d.user.portalName+' · '+d.user.role;
-    buildTabPanes(); renderNav();
+    buildTabPanes(); renderNav(); renderHeaderActions();
     document.getElementById('app').style.display='block';
     switchTab('dashboard');
     run('loadAllAppData', [], d2 => {
@@ -504,6 +506,51 @@ window.addEventListener('resize', () => {
   clearTimeout(window._navFit);
   window._navFit = setTimeout(fitNav, 80);
 });
+
+/**
+ * Recalculate and Snapshot, in the header so they are reachable from any tab.
+ *
+ * Both lived only in the Output tab's toolbar. Recalculate is the step that makes
+ * an assumption edit show up in Output at all — assumption edits deliberately do
+ * not update it — so it is the thing most likely to be wanted from wherever the
+ * edit was just made, which is the Rate Card or a mix screen, not Output.
+ *
+ * Neither action is portable on its own: doRecalc drives #recalcBtn, and showOk
+ * writes into whichever screen is on. Both of those live on the Output tab. So
+ * the header buttons switch to Output first and then run exactly the same
+ * function — which also leaves you looking at the table that is about to change.
+ * Clicked while already on Output they behave as they always did.
+ *
+ * Admin-only for the same reason the Output tab's copies are: they move every
+ * modelling area at once and there is no per-area version to fall back on. The
+ * server re-checks the rank; this only decides whether a button is drawn.
+ *
+ * Called from boot() once initApp has returned, because isAdmin() needs APP.user.
+ */
+function renderHeaderActions(){
+  const el=document.getElementById('hactions');
+  if(!el) return;
+  el.innerHTML = isAdmin()
+    ? '<button class="btn sm" id="hSnap" title="Freeze the whole Output tab under a name.">Snapshot</button>'+
+      '<button class="btn sm primary" id="hRecalc" title="Recompute Modelling and Output. Assumption '+
+        'edits do not reach Output until this is run.">Recalculate</button>'
+    : '';
+  /* Ask for the name before jumping, not after: cancelling the prompt should
+     leave you on the tab you were on rather than stranded on Output. */
+  const s=el.querySelector('#hSnap');
+  if(s) s.onclick=()=>{ const n=snapshotName(); if(n) gotoOutputThen(()=>doSnapshot(n)); };
+  const r=el.querySelector('#hRecalc');
+  if(r) r.onclick=()=>gotoOutputThen(doRecalc);
+  fitNav();   /* these buttons take room the tab row was measuring against */
+}
+/* Switch to Output, then act. switchTab renders synchronously, so #recalcBtn and
+   the .screen.on that showOk writes into exist by the time fn runs — except while
+   phase 2 is still loading, when notReady() has drawn a skeleton instead. doRecalc
+   tolerates the missing button, and the reload it triggers draws the table. */
+function gotoOutputThen(fn){
+  if(APP.activeTab!=='output') switchTab('output');
+  fn();
+}
 
 function renderActive(){
   const r={dashboard:renderDashboard, rates:renderRates, compmix:renderCompMix,
@@ -1633,17 +1680,29 @@ function showCsvFallback(text){
   if(ta){ ta.focus(); ta.select(); }
 }
 
+/* Whichever Recalculate buttons are on screen — the Output tab's, the header's,
+   or after a header click both. Empty is a legitimate answer: the header button
+   is not drawn for a non-Admin, and the tab's does not exist while phase 2 is
+   still loading and notReady() has the pane. */
+function recalcButtons(){
+  return ['recalcBtn','hRecalc'].map(id=>document.getElementById(id)).filter(Boolean);
+}
 function doRecalc(){
-  const b=document.getElementById('recalcBtn');
-  b.disabled=true; b.innerHTML='<span class="spinner"></span>Recalculating…';
+  const btns=recalcButtons();
+  btns.forEach(b=>{ b.disabled=true; b.innerHTML='<span class="spinner"></span>Recalculating…'; });
+  /* Restored on every path, the blocked one included. refreshAfterRecalc redraws
+     the Output tab's button but never the header's, so a refusal would otherwise
+     leave a disabled control with nothing left to re-enable it. */
+  const restore=()=>btns.forEach(b=>{ b.disabled=false; b.textContent='Recalculate'; });
   run('recalculate',[], resp=>{
+    restore();
     /* A refusal is a successful call that wrote nothing, not a failure. It has to
        land somewhere the user cannot walk past, because the numbers on screen are
        still the old ones and nothing else on the page would say so. */
     if(resp.blocked){ recalcBlocked(resp); return; }
     showOk('Recalculated '+resp.lines+' lines × '+resp.months+' months');
     refreshAfterRecalc();
-  }, err=>{ b.disabled=false; b.textContent='Recalculate'; showError(err.message); }, true);
+  }, err=>{ restore(); showError(err.message); }, true);
 }
 function refreshAfterRecalc(){
   run('loadAllAppData',[],d2=>{
@@ -1675,8 +1734,13 @@ function recalcBlocked(resp){
     true);
   refreshAfterRecalc();
 }
-function doSnapshot(){
-  const name=prompt('Name this snapshot (e.g. "RFQ4 2026 final"):');
+function snapshotName(){ return prompt('Name this snapshot (e.g. "RFQ4 2026 final"):'); }
+/* presetName is for the header button, which has to ask before it switches tabs
+   so that cancelling leaves you where you were. Every other caller is an onclick
+   attribute passing nothing. A DOM Event would arrive as an object and never as a
+   non-empty string, so the typeof is what stops one being taken for a name. */
+function doSnapshot(presetName){
+  const name=(typeof presetName==='string' && presetName) ? presetName : snapshotName();
   if(!name) return;
   run('createSnapshot',[name], resp=>{
     APP.ref.snapshots.push(resp.name);
