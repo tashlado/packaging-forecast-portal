@@ -1520,31 +1520,69 @@ function delCC(id){
 }
 
 /* ============================ output ============================ */
+/* Nine columns of the fourteen Output holds, in the order the segment reads:
+   who it is, when, then what it costs. The five left off — Currency, Cost_GBP,
+   Compare_Snapshot, Snapshot_Cost_Local, Variance_Local — are still written to
+   the Sheet and still in the CSV; this is a reading view, not the record.
+   Currency has not gone far: it is rendered inside the cost cell, because a
+   column of bare numbers mixing GBP with USD is a number you cannot read.
+
+   Exactly six filters, and which six is the point: the dimensions somebody
+   narrows by. An id and a cost are things you sort, not things you pick from a
+   list — High Level ID would offer a dropdown of every segment, and a range
+   filter on a cost is a question nobody asked of this table. */
 const OUTPUT_COLS = [
-  {key:'High_Level_ID',       label:'HL',           type:'num', filter:'pick', right:true},
-  {key:'Month',               label:'Month',        type:'str', filter:'pick'},
-  {key:'Customer_Type',       label:'Type',         type:'str', filter:'pick'},
-  {key:'Brand',               label:'Brand',        type:'str', filter:'pick'},
-  {key:'Geo',                 label:'Geo',          type:'str', filter:'pick'},
-  {key:'Treatment_Type',      label:'Treatment',    type:'str', filter:'pick'},
-  {key:'WL_Detail',           label:'Detail',       type:'str', filter:'pick'},
-  {key:'Currency',            label:'Ccy',          type:'str', filter:'pick'},
-  {key:'Cost_Local',          label:'Cost (local)', type:'num', filter:'range', right:true, dp:4,
-   hint:'Blended packaging cost per order for this segment that month, in the segment currency'},
-  {key:'Cost_GBP',            label:'Cost (GBP)',   type:'num', filter:'range', right:true, dp:4},
-  {key:'Snapshot_Cost_Local', label:'Snapshot',     type:'num', filter:'range', right:true, dp:4},
-  {key:'Variance_Local',      label:'Variance',     type:'num', filter:'range', right:true, cell:r=>
-    '<td class="right num '+(Number(r.Variance_Local)>0.0001?'up':
-                             Number(r.Variance_Local)<-0.0001?'down':'')+'">'+
-      esc(num(r.Variance_Local))+'</td>'}
+  {key:'High_Level_ID',  label:'High Level ID',  type:'num', filter:null, right:true},
+  {key:'Date_ID',        label:'Date ID',        type:'num', filter:null, right:true,
+   hint:'Where this month sits in the horizon, counting from 1 at HORIZON_START. '+
+        'Computed for this table, not stored — it renumbers if the horizon start moves, '+
+        'so do not key anything on it.'},
+  {key:'Brand',          label:'Brand',          type:'str', filter:'pick'},
+  {key:'Geo',            label:'Geo',            type:'str', filter:'pick'},
+  {key:'Treatment_Type', label:'Treatment Type', type:'str', filter:'pick'},
+  {key:'WL_Detail',      label:'Detail',         type:'str', filter:'pick'},
+  {key:'Customer_Type',  label:'Customer Type',  type:'str', filter:'pick'},
+  {key:'Month',          label:'Date',           type:'str', filter:'pick'},
+  {key:'Cost_Local',     label:'Cost',           type:'num', filter:null, right:true, dp:4,
+   hint:'Blended packaging cost per order for this segment that month, in the segment currency',
+   /* The currency rides in the cell rather than in a column of its own: the
+      figure is meaningless without it and the two are never read apart. Quiet,
+      because it repeats down the column and the number is what is being read. */
+   cell:r=>'<td class="right num">'+esc(num(r.Cost_Local,4))+
+     (r.Currency?' <span class="muted">'+esc(r.Currency)+'</span>':'')+'</td>'}
 ];
 const OUTPUT_RENDER_CAP = 800;
 
+/* 'yyyy-mm' → a sortable integer, or null if it is not a month. Written out
+   rather than as a regex so a month that parses is one whose parts are actually
+   in range: '2026-99' matches a digit pattern and is not a month. */
+function monthIndex(s){
+  const t=String(s||'').slice(0,7);
+  if(t.length!==7 || t.charAt(4)!=='-') return null;
+  const y=Number(t.slice(0,4)), m=Number(t.slice(5,7));
+  if(!(y>=1900 && y<=9999) || !(m>=1 && m<=12)) return null;
+  return y*12+m;
+}
 /* Month is stored as a first-of-month date and read as a month, everywhere — the
    table, the filter list and the CSV. Normalised once here so the pick list
-   offers "2026-03" rather than a dozen shapes of the same month. */
+   offers "2026-03" rather than a dozen shapes of the same month.
+
+   Date_ID is that month's position in the horizon, 1-based: the same surrogate
+   key the Postage portal's Output carries, except that portal reads it from a
+   DIM_CALENDAR tab and packaging has no calendar table to read. So it is derived
+   here, and derived means it MOVES IF HORIZON_START MOVES — every row renumbers,
+   silently. It identifies a month within the horizon as it currently stands; it
+   is not a stable key and is deliberately kept out of the CSV for that reason.
+   Blank rather than wrong when the horizon is unset or the month unparseable. */
 function outputAllRows(){
-  return APP.output.map(r=>Object.assign({}, r, { Month:String(r.Month||'').slice(0,7) }));
+  const base=monthIndex(APP.config && APP.config.horizonStart);
+  return APP.output.map(r=>{
+    const m=String(r.Month||'').slice(0,7), i=monthIndex(m);
+    return Object.assign({}, r, {
+      Month:m,
+      Date_ID:(base===null||i===null) ? '' : i-base+1
+    });
+  });
 }
 
 TBL_RENDER.output = function(){ renderOutput(); };
@@ -1581,10 +1619,15 @@ function renderOutput(){
 function outputVisibleRows(){
   return tRows('output', OUTPUT_COLS, outputAllRows());
 }
-/* The columns on screen, in the order they appear, plus Compare_Snapshot: on the
-   page that fact lives in the "Compare vs" selector because it is the same for
-   every row, but a bare file with a "Snapshot" column and nothing saying which
-   snapshot is a file you cannot check. */
+/* The whole stored row, which is no longer what is on screen. The table shows
+   nine columns for reading; an export that mirrored it would drop Cost_GBP and
+   the variance columns, which are the reason anybody takes the export at all.
+
+   Compare_Snapshot rides along because a file with a "Snapshot" column and
+   nothing saying which snapshot is a file you cannot check — on the page that
+   fact now lives on the Snapshots screen. Date_ID is deliberately absent: it is
+   computed from HORIZON_START for the table's benefit and would be wrong in a
+   file that outlives the horizon it was exported under. */
 const OUTPUT_CSV_COLS = [
   {key:'High_Level_ID'},
   {key:'Month', fmt:v=>String(v||'').slice(0,7)},
