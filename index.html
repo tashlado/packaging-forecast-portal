@@ -672,7 +672,10 @@ function renderRates(){
       '<td>'+esc(r.From_Date)+'</td><td>'+esc(r.To_Date)+'</td>'+
       '<td class="right num">'+num(r.CPU)+'</td><td class="right num">'+num(r.QTY,2)+'</td>'+
       '<td class="comment-cell" title="'+esc(r.Comment)+'">'+esc(r.Comment)+'</td>'+
-      '<td class="rowacts">'+(canEditRates()?
+      '<td class="rowacts">'+
+        '<button class="btn link" onclick="openRecordHistory(\'Rate_Card\','+r.Rate_ID+
+          ',\'rate #'+r.Rate_ID+'\')" title="What this rate said on a given date">History</button>'+
+        (canEditRates()?
         '<button class="btn link" onclick="openRateModal('+r.Rate_ID+')">Edit</button>'+
         '<button class="btn link danger" onclick="delRate('+r.Rate_ID+')">Delete</button>':'')+'</td>'+
       '</tr>').join('')
@@ -1110,7 +1113,12 @@ function renderMixEditor(){
       '<td style="min-width:96px"><input type="number" step="any" min="0" max="1" value="'+r.mix+
         '" oninput="MIXEDIT.rows['+i+'].mix=Number(this.value);mixSumPreview()"></td>'+
       '<td><input type="text" value="'+esc(r.comment)+'" onchange="MIXEDIT.rows['+i+'].comment=this.value"></td>'+
-      '<td class="rowacts"><button class="btn link danger" onclick="MIXEDIT.rows['+i+'].deleted=true;renderMixEditor()">Remove</button></td>'+
+      '<td class="rowacts">'+
+        /* Only a saved row has an amend history; one added in this editor and not
+           yet saved has no id to look up. */
+        (r.mixId?'<button class="btn link" onclick="openRecordHistory(\'Component_Mix\','+r.mixId+
+          ',\'mix #'+r.mixId+'\')">History</button>':'')+
+        '<button class="btn link danger" onclick="MIXEDIT.rows['+i+'].deleted=true;renderMixEditor()">Remove</button></td>'+
       '</tr>').join('')+
     '</tbody></table></div>';
   mixSumPreview();
@@ -1162,7 +1170,10 @@ function renderCCMix(){
       '<td>'+esc(m.From_Date)+'</td><td>'+esc(m.To_Date)+'</td>'+
       '<td class="right num">'+(Number(m.CC_Mix)*100).toFixed(1)+'%</td>'+
       '<td class="comment-cell" title="'+esc(m.Comment)+'">'+esc(m.Comment)+'</td>'+
-      '<td class="rowacts">'+(canEditMixes()?
+      '<td class="rowacts">'+
+        '<button class="btn link" onclick="openRecordHistory(\'Cold_Chain_Mix\','+m.CC_Mix_ID+
+          ',\'cold chain #'+m.CC_Mix_ID+'\')">History</button>'+
+        (canEditMixes()?
         '<button class="btn link" onclick="openCCModal('+m.CC_Mix_ID+')">Edit</button>'+
         '<button class="btn link danger" onclick="delCC('+m.CC_Mix_ID+')">Delete</button>':'')+'</td></tr>').join('')
      :'<tr><td colspan="7" class="muted">No cold chain ranges yet.</td></tr>')+
@@ -1919,6 +1930,99 @@ function submitArea(id){
   run('saveArea',[{id:id,areaName:v('a_name'),outputMetricName:v('a_metric'),
     customerTypes:v('a_types'),active:v('a_active')}],
     ()=>{ closeModal(); showOk('Saved'); reloadRefAfterDim(); }, err=>showError(err.message), true);
+}
+
+/* ==================== one record's history ====================
+   The *_Amends tabs have always held the whole post-change row for every save
+   and nothing has ever read them back, so "what was this rate before the March
+   change" has only been answerable by scrolling a hidden tab.
+
+   Opened from the row itself, because that is where the question is asked. */
+let RECHIST=null;
+function openRecordHistory(table, recordId, title){
+  RECHIST={table:table, recordId:recordId, title:title, asOf:todayStr()};
+  modal('History — '+title,'<div id="rhBody"><div class="load"><span class="spinner"></span>'+
+    'Reading the amend history&hellip;</div></div>',
+    '<button class="btn" onclick="closeModal()">Close</button>', true);
+  loadRecordHistory();
+}
+function todayStr(){
+  const d=new Date(), p=n=>('0'+n).slice(-2);
+  return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate());
+}
+function recordHistoryAsOf(val){ RECHIST.asOf=val; loadRecordHistory(); }
+function loadRecordHistory(){
+  run('recordHistory',[{table:RECHIST.table, recordId:RECHIST.recordId, asOf:RECHIST.asOf}],
+    h=>{ RECHIST.data=h; renderRecordHistory(); },
+    err=>{
+      const b=document.getElementById('rhBody');
+      if(b) b.innerHTML='<div class="err-box" style="margin:0">'+esc(err.message)+'</div>';
+    });
+}
+function renderRecordHistory(){
+  const b=document.getElementById('rhBody');
+  if(!b || !RECHIST || !RECHIST.data) return;
+  const h=RECHIST.data;
+
+  const picker='<div class="row tight" style="align-items:flex-end">'+
+    '<div class="field filter"><label>State as of</label>'+
+    '<input type="date" value="'+esc(h.asOf)+'" onchange="recordHistoryAsOf(this.value)"></div>'+
+    '<div class="spacer"></div>'+
+    '<div class="small muted" style="padding-bottom:6px">'+h.amendCount+' amendment(s) on record'+
+      (h.firstAmendAt?', from '+esc(h.firstAmendAt):'')+'</div></div>';
+
+  let state;
+  if(h.noHistory){
+    /* A row imported straight into the sheet, or written before the Amends tabs
+       existed, has no history at all. An empty panel would read as "nothing ever
+       changed", which is a different and much more reassuring claim. */
+    state='<div class="warn-box">No amendments are recorded for this '+esc(h.label)+'. '+
+      'It was either created before the portal started keeping row-level history, or written '+
+      'straight into the Google Sheet. What it says now is below.</div>';
+  } else if(!h.state){
+    state='<div class="note small muted">This '+esc(h.label)+' has no amendment on or before '+
+      esc(h.asOf)+' — its history starts on '+esc(h.firstAmendAt)+', so on that date it did not '+
+      'yet exist.</div>';
+  } else {
+    state='<div class="'+(h.state.deleted?'warn-box':'ok-box')+'" style="margin-bottom:12px">'+
+      'On '+esc(h.asOf)+' this '+esc(h.label)+' was '+
+      (h.state.deleted?'<b>deleted</b> (Active = N)':'live')+', as last saved on '+
+      esc(h.state.at)+' by '+esc(h.state.byName||h.state.by)+'.</div>';
+  }
+
+  const shown = h.state ? h.state.values : (h.current ? h.current.values : []);
+  const nowBy = {};
+  (h.current?h.current.values:[]).forEach(v=>nowBy[v.field]=v.value);
+  const valueTable = shown.length
+    ? '<div class="tablewrap"><table><thead><tr><th>Field</th>'+
+      '<th>'+(h.state?'On '+esc(h.asOf):'Value')+'</th>'+
+      (h.state&&h.current?'<th>Now</th>':'')+'</tr></thead><tbody>'+
+      shown.map(v=>{
+        const moved = h.state && h.current && String(nowBy[v.field]) !== String(v.value);
+        return '<tr><td class="muted">'+esc(v.field)+'</td>'+
+          '<td class="num'+(moved?' up':'')+'">'+esc(v.value)+'</td>'+
+          (h.state&&h.current?'<td class="num">'+esc(nowBy[v.field]===undefined?'—':nowBy[v.field])+'</td>':'')+
+          '</tr>';
+      }).join('')+'</tbody></table></div>'
+    : '<div class="empty">Nothing to show.</div>';
+
+  const timeline = h.timeline.length
+    ? '<div class="tablewrap"><table><thead><tr><th>When</th><th>What</th><th>Who</th>'+
+      '<th>Changed</th></tr></thead><tbody>'+
+      h.timeline.map(t=>'<tr><td>'+esc(t.at)+'</td>'+
+        '<td><span class="badge'+(t.type==='DELETE'?' err':t.type==='CREATE'?' green':'')+'">'+
+          esc(t.type)+'</span></td>'+
+        '<td class="small">'+esc(t.byName||t.by)+'</td>'+
+        '<td class="small">'+(t.changes.length
+          ? t.changes.map(ch=>esc(ch.field)+': <span class="muted">'+esc(ch.from||'(blank)')+
+              '</span> &rarr; '+esc(ch.to||'(blank)')).join('<br>')
+          : '<span class="muted">'+(t.type==='CREATE'?'created':'saved, no field changed')+'</span>')+
+        '</td></tr>').join('')+'</tbody></table></div>'
+    : '';
+
+  b.innerHTML = picker + state + valueTable +
+    (timeline?'<div class="fsplit">Amendments<span>newest first, from the '+
+      esc(RECHIST.table)+'_Amends tab</span></div>'+timeline:'');
 }
 
 /* =========================== history =========================== */
