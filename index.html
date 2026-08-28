@@ -1552,17 +1552,15 @@ function renderOutput(){
   if(notReady('output')) return;
   const all=outputAllRows();
   const rows=tRows('output', OUTPUT_COLS, all);
-  const snapOpts=['(none)'].concat(APP.ref.snapshots)
-    .map(s=>'<option'+((APP.config.compareSnapshot||'(none)')===s?' selected':'')+'>'+esc(s)+'</option>').join('');
   pane('output').innerHTML=
     '<div class="card"><div class="body"><div class="row tight">'+
     tToolbar('output', OUTPUT_COLS, Math.min(rows.length, tState('output').showAll?rows.length:OUTPUT_RENDER_CAP), all.length)+
     '<div class="spacer"></div>'+
-    /* Recalculate, Snapshot and the comparison baseline are portal-wide — they move
-       every area at once — so they are Admin's, and the server re-checks. Export
-       and Copy are reads, and belong to anyone who can see the table. */
-    '<div class="field filter"><label>Compare vs</label><select id="snapSel" '+(isAdmin()?'':'disabled')+
-      ' onchange="changeCompareSnapshot(this.value)">'+snapOpts+'</select></div>'+
+    /* Recalculate and Snapshot are portal-wide — they move every area at once — so
+       they are Admin's, and the server re-checks. Export and Copy are reads, and
+       belong to anyone who can see the table. The variance baseline used to sit
+       here too; it lives on the Snapshots screen now, with the snapshots it picks
+       between. */
     '<button class="btn" onclick="exportOutputCsv()">Export CSV</button>'+
     '<button class="btn" onclick="copyOutputCsv()">Copy</button>'+
     (isAdmin()?'<button class="btn" onclick="doSnapshot()">Snapshot</button>':'')+
@@ -2283,6 +2281,21 @@ function renderSnapshots(){
       esc(s.name)+' — '+esc(s.createdAt)+'</option>').join('');
   if(!SNAPSEL.from && list.length) SNAPSEL.from=list[0].name;
 
+  /* Which snapshot the Output tab's variance columns measure against — the
+     Config key COMPARE_SNAPSHOT. It used to be a "Compare vs" selector on the
+     Output tab; it belongs with the snapshots it picks between, and Output no
+     longer shows the variance columns it drives.
+
+     The name currently set is offered even when the list does not contain it, so
+     a snapshot deleted out from under the config reads as still set rather than
+     silently as "(none)" — which would invite somebody to "fix" it by picking
+     something else without knowing what it was. */
+  const curBase=String(APP.config.compareSnapshot||'');
+  const baseNames=list.map(s=>s.name);
+  if(curBase && baseNames.indexOf(curBase)<0) baseNames.push(curBase);
+  const baseOpts=['(none)'].concat(baseNames)
+    .map(s=>'<option'+((curBase||'(none)')===s?' selected':'')+'>'+esc(s)+'</option>').join('');
+
   const table = list.length
     ? '<div class="tablewrap"><table><thead><tr><th>Name</th><th>Taken</th><th>By</th>'+
       '<th>Covers</th><th class="right">Segments</th><th class="right">Rows</th>'+
@@ -2315,11 +2328,17 @@ function renderSnapshots(){
     '<button class="btn primary" id="snapGo" onclick="snapCompare()"'+
       (list.length?'':' disabled')+'>Compare</button>'+
     '<div class="spacer"></div>'+
+    '<div class="field filter"><label>Variance baseline</label><select id="snapSel" '+
+      (isAdmin()?'':'disabled')+' onchange="changeCompareSnapshot(this.value)">'+baseOpts+'</select></div>'+
     (isAdmin()?'<button class="btn" onclick="doSnapshot()">Take a snapshot</button>':'')+
     '</div>'+
     '<div class="hint">A snapshot freezes the whole Output tab under a name. Comparing one '+
       'with <b>now</b> is how you see what has moved since it was taken; comparing two says '+
-      'what happened between them.</div>'+
+      'what happened between them. <b>Variance baseline</b> is a different question: it sets '+
+      'which snapshot the Output tab of the Google Sheet measures its variance columns '+
+      'against, for downstream extracts, and takes effect on the next Recalculate.'+
+      (isAdmin()?'':' Setting it is Admin-only, because it moves every modelling area at once.')+
+      '</div>'+
     '</div></div>'+
     '<div class="card"><h2>Snapshots</h2>'+table+'</div>'+
     '<div id="snapDiff">'+(SNAPDIFF?snapDiffHtml(SNAPDIFF):'')+'</div>';
