@@ -258,7 +258,7 @@ input.bad{border-color:var(--err);background:#FFF6F7}
 /* ============================ state ============================ */
 const APP = {
   user:null, ref:null, config:null,
-  rates:[], compMix:[], ccMix:[], fx:[], output:[], audit:[], validation:[], completeness:null,
+  rates:[], compMix:[], ccMix:[], fx:[], output:[], audit:[], validation:[], activeLines:0,
   loadState:'loading', activeTab:'dashboard',
   filters:{ rateBrand:'', rateGeo:'', rateSearch:'', outBrand:'', outGeo:'', outType:'',
             valSeverity:'', valRule:'' }
@@ -349,7 +349,7 @@ window.onload = function(){
     run('loadAllAppData', [], d2 => {
       Object.assign(APP, {rates:d2.rates, compMix:d2.compMix, ccMix:d2.ccMix, fx:d2.fx,
                           output:d2.output, validation:d2.validation||[],
-                          completeness:d2.completeness, config:d2.config});
+                          activeLines:d2.activeLines, config:d2.config});
       if(d2.audit) APP.audit=d2.audit;
       APP.loadState='ready';
       renderActive(); renderStatusChip();
@@ -584,25 +584,50 @@ function selOptions(sel, list){
 }
 
 /* =========================== dashboard =========================== */
+/* The three rules the Dashboard's old completeness check became, in the order
+   somebody should work through them: error, warning, note. */
+const COMPLETENESS_RULES = ['NO_RATE','NO_COMP_MIX','NO_CC_MIX'];
+
 function renderDashboard(){
   if(notReady('dashboard')) return;
-  const c=APP.completeness||{totalLines:0,gaps:[]};
-  const gapsHtml = c.gaps.length
-    ? c.gaps.map(g=>'<tr><td>'+g.modellingId+'</td><td>'+esc(lineLabel(g.modellingId))+'</td>'+
-        '<td><span class="badge amber">'+esc(g.missing.join(', '))+'</span></td></tr>').join('')
-    : '<tr><td colspan="3" class="muted">All active lines have rates, component mix and cold chain mix.</td></tr>';
+  const gaps=(APP.validation||[])
+    .filter(r=>COMPLETENESS_RULES.indexOf(String(r.Rule_Code))>=0)
+    .sort((a,b)=>COMPLETENESS_RULES.indexOf(String(a.Rule_Code))-
+                 COMPLETENESS_RULES.indexOf(String(b.Rule_Code)));
+  let gapsHtml;
+  if(!APP.config.lastValidation){
+    /* These are rule-pack findings now, so before it has ever run there is
+       nothing to show — and printing "all clear" would be a lie of omission. */
+    gapsHtml='<tr><td colspan="4" class="muted">Validation has not been run yet, so these '+
+      'have not been checked. Open the Validation tab and hit Re-run.</td></tr>';
+  } else if(!gaps.length){
+    gapsHtml='<tr><td colspan="4" class="muted">Every active line has a rate and a component '+
+      'mix, and every High Level ID has a cold chain share.</td></tr>';
+  } else {
+    gapsHtml=gaps.slice(0,200).map(g=>'<tr><td>'+sevBadge(g.Severity)+'</td>'+
+      '<td class="num">'+esc(g.Modelling_ID||g.High_Level_ID)+'</td>'+
+      '<td>'+esc(g.Modelling_ID?lineLabel(g.Modelling_ID):hlLabel(hlById(g.High_Level_ID)))+'</td>'+
+      '<td>'+esc(g.Message)+'</td></tr>').join('');
+    if(gaps.length>200) gapsHtml+='<tr><td colspan="4" class="muted">Showing 200 of '+
+      gaps.length+' — the rest are on the Validation tab.</td></tr>';
+  }
   pane('dashboard').innerHTML=
     '<div class="grid3">'+
     '<div class="card"><div class="body"><div class="small muted">Active modelling lines</div>'+
-      '<div class="stat num">'+c.totalLines+'</div></div></div>'+
+      '<div class="stat num">'+(APP.activeLines||0)+'</div></div></div>'+
     '<div class="card"><div class="body"><div class="small muted">Last recalculation</div>'+
       '<div class="stat sm">'+esc(APP.config.lastRecalc||'Never')+'</div></div></div>'+
     '<div class="card"><div class="body"><div class="small muted">Comparing against snapshot</div>'+
       '<div class="stat sm">'+esc(APP.config.compareSnapshot||'—')+'</div></div></div>'+
     '</div>'+
     validationSummaryCard()+
-    '<div class="card"><h2>Completeness checks</h2>'+
-    '<div class="tablewrap"><table><thead><tr><th>Line</th><th>Description</th><th>Missing</th></tr></thead>'+
+    '<div class="card"><h2>Completeness checks'+
+      '<span class="act"><button class="btn sm" onclick="switchTab(\'validation\')">All findings</button></span></h2>'+
+    '<div class="note small muted" style="padding:10px 16px 0">Part of the rule pack, so these '+
+      'carry a severity: a line with no rate at all is an ERROR and blocks a recalculation, a '+
+      'missing component mix is a warning, and a missing cold chain share is a note.</div>'+
+    '<div class="tablewrap"><table><thead><tr><th>Severity</th><th>ID</th><th>Description</th>'+
+    '<th>What was found</th></tr></thead>'+
     '<tbody>'+gapsHtml+'</tbody></table></div></div>';
 }
 
@@ -993,7 +1018,7 @@ function bulkApply(){
            (res.rowsRevised?', '+res.rowsRevised+' revised in place':'')+
            '. Recalculate to see it in Output.');
     run('loadAllAppData',[],d2=>{
-      Object.assign(APP,{rates:d2.rates, completeness:d2.completeness, config:d2.config});
+      Object.assign(APP,{rates:d2.rates, activeLines:d2.activeLines, config:d2.config});
       if(d2.audit) APP.audit=d2.audit;
       renderActive();
     });
@@ -1115,7 +1140,7 @@ function saveMixGroup(){
   run('saveComponentMixGroup',[{highLevelId:MIXEDIT.hlId, hlComponent:MIXEDIT.hlComponent, rows:MIXEDIT.rows}],
     ()=>{
       closeModal(); showOk('Mix group saved');
-      run('loadAllAppData',[],d2=>{ Object.assign(APP,{compMix:d2.compMix,completeness:d2.completeness}); renderActive(); });
+      run('loadAllAppData',[],d2=>{ Object.assign(APP,{compMix:d2.compMix,activeLines:d2.activeLines}); renderActive(); });
     },
     err=>{ btn.disabled=false; btn.textContent='Save group'; showError(err.message); },
     true);
@@ -1357,7 +1382,7 @@ function doRecalc(){
 function refreshAfterRecalc(){
   run('loadAllAppData',[],d2=>{
     Object.assign(APP,{output:d2.output, validation:d2.validation||[],
-                       config:d2.config, completeness:d2.completeness});
+                       config:d2.config, activeLines:d2.activeLines});
     renderActive(); renderStatusChip();
   });
 }

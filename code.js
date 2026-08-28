@@ -104,7 +104,9 @@ function loadAllAppData() {
     fx:       tableToObjects_(SHEET.FX),
     output:   tableToObjects_(SHEET.OUTPUT),
     validation: validationRows_(),
-    completeness: computeCompleteness_(),
+    /* Kept alongside the rule pack because it is the one count the Dashboard shows
+       that does not depend on validation having been run. */
+    activeLines: tableToObjects_(SHEET.LINES).filter(l => isActive(l.Active)).length,
     config:   publicConfig_()
   };
   /* Can_View_Audit rather than Admin rank: the history is a read, and somebody
@@ -130,25 +132,8 @@ function validationRows_() {
   }
 }
 
-/* Dashboard completeness: per active line, does it have any rates / any mix,
-   and does its High Level ID have any CC mix rows? Cheap but catches the
-   "added a line, forgot the assumptions" gap immediately. */
-function computeCompleteness_() {
-  const lines = tableToObjects_(SHEET.LINES).filter(l => isActive(l.Active));
-  const rates = tableToObjects_(SHEET.RATES).filter(r => isActive(r.Active));
-  const mixes = tableToObjects_(SHEET.COMP_MIX).filter(m => isActive(m.Active));
-  const ccs   = tableToObjects_(SHEET.CC_MIX).filter(c => isActive(c.Active));
-  const hasRate = {}, hasMix = {}, hasCC = {};
-  rates.forEach(r => hasRate[r.Modelling_ID] = true);
-  mixes.forEach(m => hasMix[m.Modelling_ID] = true);
-  ccs.forEach(c => hasCC[c.High_Level_ID] = true);
-  const gaps = [];
-  lines.forEach(l => {
-    const missing = [];
-    if (!hasRate[l.Modelling_ID]) missing.push('rates');
-    if (!hasMix[l.Modelling_ID]) missing.push('component mix');
-    if (!hasCC[l.High_Level_ID]) missing.push('cold chain mix');
-    if (missing.length) gaps.push({ modellingId: l.Modelling_ID, highLevelId: l.High_Level_ID, missing: missing });
-  });
-  return { totalLines: lines.length, gaps: gaps };
-}
+/* computeCompleteness_ used to live here. It is now three rules in validate.js —
+   NO_RATE (ERROR), NO_COMP_MIX (WARN) and NO_CC_MIX (INFO) — so the Dashboard
+   reads one severity-ranked report rather than a second mechanism answering an
+   overlapping question in different words, and a missing rate blocks a
+   recalculation the way any other wrong-forecast finding does. */

@@ -70,6 +70,14 @@ function runValidationCore_(computedOutputRows) {
   const input = validationInput_();
   const findings = [];
 
+  /* Structure first, then assumptions, then the shape of the answer. A table
+     with a dangling foreign key or a duplicate line makes every rule after it
+     report nonsense, so those findings want to be the ones read first. */
+  ruleOrphanFk_(input, findings);
+  ruleDupModelling_(input, findings);
+  ruleRateNeg_(input, findings);
+  ruleRangeOverlap_(input, findings);
+  ruleCompleteness_(input, findings);
   ruleMixSum_(input, findings);
   ruleMixOverlap_(input, findings);
   ruleRateMissing_(input, findings);
@@ -183,6 +191,42 @@ function validationInput_() {
   vDated_(tableToObjects_(SHEET.COMP_MIX).filter(r => isActive(r.Active)))
     .forEach(r => (mixByMid[r.Modelling_ID] = mixByMid[r.Modelling_ID] || []).push(r));
 
+  /* The tables as they actually are, unfiltered.
+
+     Everything above is the population the ENGINE costs — active lines under
+     active parents, rows whose dates parse. That is the right lens for asking
+     whether the forecast is wrong, and the wrong one for asking whether the
+     data is intact: a line pointing at a High Level ID that does not exist is
+     precisely the row the filter above throws away, so a rule reading only
+     input.lines can never see it. ORPHAN_FK, DUP_MODELLING, RATE_NEG and
+     RANGE_OVERLAP read these instead. */
+  const raw = {
+    areas:  tableToObjects_(SHEET.AREAS),
+    hl:     tableToObjects_(SHEET.HL),
+    comps:  tableToObjects_(SHEET.COMPONENTS),
+    lines:  tableToObjects_(SHEET.LINES),
+    rates:  tableToObjects_(SHEET.RATES),
+    mixes:  tableToObjects_(SHEET.COMP_MIX),
+    ccMix:  tableToObjects_(SHEET.CC_MIX)
+  };
+
+  /* Customer types per modelling line, over the RAW tables, because
+     RANGE_OVERLAP has to expand an 'All' row on a line whose parent may be
+     inactive. Same fallback the engine and rates.js use. */
+  const rawAreaTypes = {};
+  raw.areas.forEach(a => {
+    const t = safeStr(a.Customer_Types).split(',').map(x => x.trim()).filter(Boolean);
+    rawAreaTypes[a.Area_ID] = t.length ? t : ['New', 'Repeat', 'OTC'];
+  });
+  const rawHlById = {};
+  raw.hl.forEach(h => rawHlById[h.High_Level_ID] = h);
+  const typesByMid = {}, hlByMid = {};
+  raw.lines.forEach(l => {
+    const h = rawHlById[l.High_Level_ID];
+    hlByMid[l.Modelling_ID] = l.High_Level_ID;
+    typesByMid[l.Modelling_ID] = (h && rawAreaTypes[h.Area_ID]) || ['New', 'Repeat', 'OTC'];
+  });
+
   /* A month with a rate or component-mix boundary inside it is a TRANSITION
      month. The engine day-weights it — a line starting on the 20th bills 12/31 of
      January — so its total is a fraction of a monthly run rate rather than a run
@@ -204,6 +248,7 @@ function validationInput_() {
   const swingRaw = Number(cfg.VALIDATION_SWING_PCT);
   return {
     partialMonths: partialMonths,
+    raw: raw, rawHlById: rawHlById, typesByMid: typesByMid, hlByMid: hlByMid,
     months: months, lines: lines, hlById: hlById, compById: compById,
     ratesByMid: ratesByMid, mixByMid: mixByMid,
     /* The forecast window as [hStartMs, hEndMs) in UTC-day ms. Rules that walk
@@ -215,6 +260,384 @@ function validationInput_() {
 }
 
 /* ---------------- rules ---------------- */
+
+/**
+ * ORPHAN_FK — an active row pointing at a dimension that is gone or switched off.
+ *
+ * Every table here refers to another by id, and nothing in the Sheet enforces
+ * that the other end exists. Two ways it breaks, both ERROR, both silent:
+ *
+ *   MISSING — the id is not in the parent table at all. A typed id, a row
+ *     deleted by hand rather than deactivated, a half-finished import.
+ *
+ *   INACTIVE — the parent is there but switched off. This is the one people do
+ *     not expect, because it looks deliberate. computeAll_ builds hlById from
+ *     ACTIVE High Level IDs only and then filters lines to `hlById[...]`, so
+ *     deactivating a High Level ID silently drops every line under it — and
+ *     those lines still say Active = Y, still show in the portal, and still
+ *     look costed. The rates hanging off them are the same story one level
+ *     down.
+ *
+ * The fix is always the same shape and the message says it: switch the children
+ * off too, or switch the parent back on.
+ *
+ * Reported at the BOUNDARY of a switched-off region, once, and not all the way
+ * down it. Deactivating a High Level ID is a normal thing to do and the portal's
+ * soft delete has never cascaded, so a segment that is properly off still has
+ * its lines, their rates, their mixes and its cold chain rows sitting there. If
+ * every one of those counted, retiring one High Level ID would raise a dozen
+ * errors and block the next recalculation until somebody had ticked through all
+ * of them — which is how a rule pack teaches people to set
+ * VALIDATION_BLOCKS_RECALC to FALSE.
+ *
+ * So a row is reported when its own parent is off and that parent's ancestors
+ * are fine — the parent was retired on its own and this row is a straggler — and
+ * passed over when the break is further up, because the row above it already
+ * carries the finding. A parent that is MISSING rather than inactive is always
+ * reported: a dangling id is never somebody's deliberate act.
+ *
+ * Not checked here: Rate_Card.Customer_Type against its area's list. That is a
+ * value rather than an id, 'All' is legal for every area, and RATE_MISSING
+ * already reports the consequence — a customer type nothing prices.
+ */
+function ruleOrphanFk_(input, out) {
+  const raw = input.raw;
+  const by = (rows, key) => {
+    const m = {};
+    rows.forEach(r => { const k = safeStr(r[key]); if (k !== '') m[k] = r; });
+    return m;
+  };
+  const areas = by(raw.areas, 'Area_ID');
+  const hls   = by(raw.hl, 'High_Level_ID');
+  const comps = by(raw.comps, 'Component_ID');
+  const lines = by(raw.lines, 'Modelling_ID');
+
+  /* Is something ABOVE this row already switched off? Not the row itself — that
+     is what the check below tests — but its parents. True means the row sits
+     inside a region somebody turned off on purpose, and its own children are
+     therefore not stragglers worth reporting. */
+  const areaOff = id => { const a = areas[safeStr(id)]; return !a || !isActive(a.Active); };
+  const ancestorOff = {};
+  ancestorOff.hl = h => !!h && areaOff(h.Area_ID);
+  ancestorOff.comp = c => !!c && areaOff(c.Area_ID);
+  ancestorOff.line = l => {
+    if (!l) return false;
+    const h = hls[safeStr(l.High_Level_ID)], c = comps[safeStr(l.Component_ID)];
+    if (h && (!isActive(h.Active) || ancestorOff.hl(h))) return true;
+    return !!(c && (!isActive(c.Active) || ancestorOff.comp(c)));
+  };
+  const parentInsideOffRegion = (parent, parentKind) =>
+    parentKind === 'hl'   ? ancestorOff.hl(parent) :
+    parentKind === 'comp' ? ancestorOff.comp(parent) :
+    parentKind === 'line' ? ancestorOff.line(parent) : false;
+
+  /* child rows, the column holding the foreign key, the parent index, and how to
+     name both ends in the message. */
+  const checks = [
+    { rows: raw.lines,  fk: 'High_Level_ID', parents: hls,   childWhat: 'Modelling line',
+      idKey: 'Modelling_ID', parentWhat: 'High Level ID', parentKind: 'hl' },
+    { rows: raw.lines,  fk: 'Component_ID',  parents: comps, childWhat: 'Modelling line',
+      idKey: 'Modelling_ID', parentWhat: 'component', parentKind: 'comp' },
+    { rows: raw.hl,     fk: 'Area_ID',       parents: areas, childWhat: 'High Level ID',
+      idKey: 'High_Level_ID', parentWhat: 'modelling area', parentKind: 'area' },
+    { rows: raw.comps,  fk: 'Area_ID',       parents: areas, childWhat: 'Component',
+      idKey: 'Component_ID', parentWhat: 'modelling area', parentKind: 'area' },
+    { rows: raw.rates,  fk: 'Modelling_ID',  parents: lines, childWhat: 'Rate card row',
+      idKey: 'Rate_ID', parentWhat: 'modelling line', parentKind: 'line' },
+    { rows: raw.mixes,  fk: 'Modelling_ID',  parents: lines, childWhat: 'Component mix row',
+      idKey: 'Mix_ID', parentWhat: 'modelling line', parentKind: 'line' },
+    { rows: raw.ccMix,  fk: 'High_Level_ID', parents: hls,   childWhat: 'Cold chain mix row',
+      idKey: 'CC_Mix_ID', parentWhat: 'High Level ID', parentKind: 'hl' }
+  ];
+
+  checks.forEach(chk => {
+    chk.rows.forEach(r => {
+      if (!isActive(r.Active)) return;                 // a switched-off child is nobody's problem
+      const fkVal = safeStr(r[chk.fk]);
+      const parent = fkVal === '' ? null : chk.parents[fkVal];
+      if (parent && isActive(parent.Active)) return;
+      /* The parent is off, but so is something above it — the break is reported
+         higher up the chain and repeating it here adds rows, not information. */
+      if (parent && parentInsideOffRegion(parent, chk.parentKind)) return;
+
+      const childId = safeStr(r[chk.idKey]);
+      const hlId = chk.fk === 'High_Level_ID' ? fkVal
+                 : (r.High_Level_ID !== undefined ? safeStr(r.High_Level_ID)
+                 : (input.hlByMid[r.Modelling_ID] !== undefined ? input.hlByMid[r.Modelling_ID] : ''));
+      const mid = r.Modelling_ID !== undefined ? safeStr(r.Modelling_ID)
+                : (chk.idKey === 'Modelling_ID' ? childId : '');
+
+      out.push({
+        rule: 'ORPHAN_FK', severity: SEVERITY.ERROR,
+        hlId: hlId, modellingId: mid, month: '',
+        message: chk.childWhat + ' #' + childId + ' is active but its ' + chk.parentWhat + ' ' +
+          (fkVal === ''
+            ? 'is blank, so nothing links it to the rest of the model.'
+            : (!parent
+                ? '#' + fkVal + ' does not exist, so every reference to it goes nowhere.'
+                : '#' + fkVal + ' is switched off. The engine only costs rows whose parents ' +
+                  'are active, so this one contributes nothing while still reading as live.')) +
+          ' Switch it off too, or switch ' +
+          (fkVal === '' ? 'a ' + chk.parentWhat + ' in' : 'the ' + chk.parentWhat + ' back on') + '.'
+      });
+    });
+  });
+}
+
+/**
+ * DUP_MODELLING — two active lines for the same High Level ID and component.
+ *
+ * saveLine refuses this, so a duplicate arrived some other way. It matters
+ * because computeAll_ walks lines and ADDS each one's contribution: two lines
+ * for the same carton both carry a mix and both get costed, so the component is
+ * counted twice. MIX_SUM does not catch it — each line's mix is read
+ * separately, and two rows at 0.7 and 0.3 under one High Level Component still
+ * total 100% while pricing 200% of the orders.
+ */
+function ruleDupModelling_(input, out) {
+  const groups = {};
+  input.raw.lines.forEach(l => {
+    if (!isActive(l.Active)) return;
+    const hl = safeStr(l.High_Level_ID), cp = safeStr(l.Component_ID);
+    if (hl === '' || cp === '') return;                // ORPHAN_FK's business
+    (groups[hl + '||' + cp] = groups[hl + '||' + cp] || []).push(l);
+  });
+  Object.keys(groups).sort().forEach(k => {
+    const g = groups[k];
+    if (g.length < 2) return;
+    const parts = k.split('||');
+    const comp = input.compById[parts[1]];
+    out.push({
+      rule: 'DUP_MODELLING', severity: SEVERITY.ERROR,
+      hlId: parts[0], modellingId: g[0].Modelling_ID, month: '',
+      message: vHlLabel_(input.rawHlById[parts[0]]) + ' has ' + g.length + ' active lines for ' +
+        (comp ? safeStr(comp.Component) : 'component ' + parts[1]) + ' — lines ' +
+        g.map(l => l.Modelling_ID).join(', ') + '. The engine costs each line separately and ' +
+        'adds them, so this component is being counted ' + g.length + ' times over. ' +
+        'Deactivate all but one and move its assumptions across.'
+    });
+  });
+}
+
+/**
+ * RATE_NEG — a CPU or QTY that is negative, or that is not a number at all.
+ *
+ * saveRate checks isNaN and stops there, so a negative price passes it. Nothing
+ * downstream objects either: cost = CPU x QTY x mix x days, and a negative CPU
+ * simply produces a negative cost that nets off against the rest of the High
+ * Level ID in Output, where it is invisible.
+ *
+ * Non-numeric is the same failure with a different cause. safeNum turns
+ * anything unreadable into 0, so a cell holding "0.40 " with a stray character,
+ * or a formula that errored, prices the component at nothing rather than
+ * refusing to price it — and RATE_MISSING will not see it, because a row IS in
+ * force.
+ */
+function ruleRateNeg_(input, out) {
+  input.raw.rates.forEach(r => {
+    if (!isActive(r.Active)) return;
+    const bad = [];
+    [['CPU', r.CPU], ['QTY', r.QTY]].forEach(pair => {
+      const name = pair[0], v = pair[1];
+      if (v === '' || v === null || v === undefined) { bad.push(name + ' is blank'); return; }
+      const n = Number(v);
+      if (isNaN(n)) { bad.push(name + ' reads "' + safeStr(v) + '", which is not a number'); return; }
+      if (n < 0) bad.push(name + ' is ' + n);
+    });
+    if (!bad.length) return;
+    const mid = safeStr(r.Modelling_ID);
+    out.push({
+      rule: 'RATE_NEG', severity: SEVERITY.ERROR,
+      hlId: input.hlByMid[mid] === undefined ? '' : input.hlByMid[mid], modellingId: mid, month: '',
+      message: 'Rate #' + safeStr(r.Rate_ID) + ' on line ' + mid + ' (' + safeStr(r.CC_Flag) + '/' +
+        safeStr(r.Customer_Type) + ', ' + safeStr(r.From_Date) + ' to ' + safeStr(r.To_Date) +
+        '): ' + bad.join('; ') + '. A negative value nets off against the rest of the High Level ' +
+        'ID in Output and a blank or unreadable one is costed as zero, so neither shows up as ' +
+        'a missing rate.'
+    });
+  });
+}
+
+/**
+ * RANGE_OVERLAP — two active rows of one thing covering the same day.
+ *
+ * saveRate enforces this per payload (spec 6.1) and saveCCMix does the same for
+ * cold chain, but only on the row in front of them. A bulk change, an import or
+ * a hand edit can leave a pair no single save would have accepted, and the
+ * engine does not resolve an overlap in anybody's favour: it adds every rate row
+ * in force, and takes the FIRST cold chain row it finds, which is whichever the
+ * sheet happens to list first.
+ *
+ * Rates are compared slot by slot, reusing rates.js's own expansion — a 'Both'
+ * row occupies the CC and the Ambient slot, an 'All' row every customer type of
+ * its area. Exact-key matching would miss that a Both/All row and a CC/New row
+ * are the same slot, which is the overlap most likely to be made.
+ *
+ * Component mix has its own rule (MIX_OVERLAP) because the consequence there is
+ * different enough to need its own explanation.
+ *
+ * Clipped to the horizon, like MIX_SUM: an overlap between two rows that both
+ * expired in 2024 cannot make a 2026 number wrong, and left in it errors on
+ * every run forever.
+ *
+ * One finding per line and per High Level ID. A line with a run of overlaps has
+ * one thing wrong with it, and listing every pair buries the other lines.
+ */
+function ruleRangeOverlap_(input, out) {
+  const inHorizon = r => r._f < input.hEndMs && r._t > input.hStartMs;
+
+  /* ---- rate card, per line, per expanded slot ---- */
+  const ratesByMid = {};
+  vDated_(input.raw.rates.filter(r => isActive(r.Active)))
+    .filter(inHorizon)
+    .forEach(r => (ratesByMid[r.Modelling_ID] = ratesByMid[r.Modelling_ID] || []).push(r));
+
+  Object.keys(ratesByMid).sort((a, b) => safeNum(a) - safeNum(b)).forEach(mid => {
+    const types = input.typesByMid[mid] || ['New', 'Repeat', 'OTC'];
+    const slots = {};
+    ratesByMid[mid].forEach(r => {
+      expandCC_(safeStr(r.CC_Flag)).forEach(cc => {
+        expandCT_(safeStr(r.Customer_Type), types).forEach(ct => {
+          (slots[cc + '|' + ct] = slots[cc + '|' + ct] || []).push(r);
+        });
+      });
+    });
+    let found = null;
+    Object.keys(slots).sort().forEach(slot => {
+      if (found) return;
+      const rs = slots[slot].slice().sort((a, b) => a._f - b._f || a._t - b._t);
+      for (let i = 1; i < rs.length; i++) {
+        if (rs[i]._f >= rs[i - 1]._t) continue;
+        found = { slot: slot, a: rs[i - 1], b: rs[i] };
+        return;
+      }
+    });
+    if (!found) return;
+    const hlId = input.hlByMid[mid] === undefined ? '' : input.hlByMid[mid];
+    const span = r => safeStr(r.CC_Flag) + '/' + safeStr(r.Customer_Type) + ', ' +
+                      vDayStr_(r._f) + ' to ' + vDayStr_(r._t - DAY_MS);
+    out.push({
+      rule: 'RANGE_OVERLAP', severity: SEVERITY.ERROR,
+      hlId: hlId, modellingId: mid,
+      month: vMonthOf_(Math.max(found.b._f, input.hStartMs)),
+      message: 'Line ' + mid + ' (' + vHlLabel_(input.rawHlById[hlId]) + '): rates #' +
+        found.a.Rate_ID + ' (' + span(found.a) + ') and #' + found.b.Rate_ID + ' (' +
+        span(found.b) + ') both cover ' + found.slot.replace('|', ' / ') + ' from ' +
+        vDayStr_(found.b._f) + '. The engine adds every rate in force rather than picking one, ' +
+        'so those days are costed at both. Close #' + found.a.Rate_ID + ' the day before #' +
+        found.b.Rate_ID + ' starts.'
+    });
+  });
+
+  /* ---- cold chain mix, per High Level ID ---- */
+  const ccByHl = {};
+  vDated_(input.raw.ccMix.filter(r => isActive(r.Active)))
+    .filter(inHorizon)
+    .forEach(r => (ccByHl[r.High_Level_ID] = ccByHl[r.High_Level_ID] || []).push(r));
+
+  Object.keys(ccByHl).sort((a, b) => safeNum(a) - safeNum(b)).forEach(hlId => {
+    const rs = ccByHl[hlId].slice().sort((a, b) => a._f - b._f || a._t - b._t);
+    for (let i = 1; i < rs.length; i++) {
+      const a = rs[i - 1], b = rs[i];
+      if (b._f >= a._t) continue;
+      out.push({
+        rule: 'RANGE_OVERLAP', severity: SEVERITY.ERROR,
+        hlId: hlId, modellingId: '', month: vMonthOf_(Math.max(b._f, input.hStartMs)),
+        message: vHlLabel_(input.rawHlById[hlId]) + ': cold chain rows #' + a.CC_Mix_ID + ' (' +
+          vDayStr_(a._f) + ' to ' + vDayStr_(a._t - DAY_MS) + ' at ' + safeNum(a.CC_Mix) +
+          ') and #' + b.CC_Mix_ID + ' (' + vDayStr_(b._f) + ' to ' + vDayStr_(b._t - DAY_MS) +
+          ' at ' + safeNum(b.CC_Mix) + ') both cover ' + vDayStr_(b._f) + '. The engine takes ' +
+          'the first row it finds rather than the later one, so which share applies depends on ' +
+          'the order of the tab. Close #' + a.CC_Mix_ID + ' the day before #' + b.CC_Mix_ID +
+          ' starts.'
+      });
+      return;
+    }
+  });
+}
+
+/**
+ * NO_RATE / NO_COMP_MIX / NO_CC_MIX — an active line with nothing to cost it.
+ *
+ * This is the Dashboard's old completeness check, folded into the rule pack so
+ * there is one severity-ranked report rather than two mechanisms answering
+ * overlapping questions in different words. The severities are the point of
+ * folding it in, because the three gaps are not equally bad:
+ *
+ *   NO_RATE      ERROR  cost = rate x mix x days. No rate at all means the line
+ *                       is costed at zero, and in Output that is indistinguishable
+ *                       from a component switched off on purpose.
+ *   NO_COMP_MIX  WARN   also costs zero, but "no mix" is a legitimate way to say
+ *                       the component is not shipping yet. Worth a look, not a
+ *                       reason to stop a recalculation.
+ *   NO_CC_MIX    INFO   a missing cold chain share is read as 0%, which is a
+ *                       correct answer for everything that ships ambient. Only
+ *                       a High Level ID with a CC or Ambient rate is affected at
+ *                       all, and that is a question rather than a defect.
+ *
+ * Deliberately NOT horizon-clipped, unlike RANGE_GAP. "This line has never had a
+ * rate" is worth saying whatever the horizon is set to, and it is the check
+ * somebody wants the moment they add a line. RANGE_GAP answers the narrower and
+ * horizon-shaped question of a hole between two covered months.
+ *
+ * The rows-exist-but-no-readable-dates case gets its own sentence. The engine
+ * drops a row whose From/To will not parse, so the line really is uncosted —
+ * but telling somebody they have no rate card row when they can see one on the
+ * tab sends them looking in the wrong place.
+ */
+function ruleCompleteness_(input, out) {
+  const countActive = (rows, key, val) =>
+    rows.filter(r => isActive(r.Active) && String(r[key]) === String(val)).length;
+
+  input.lines.forEach(line => {
+    const rateRows = countActive(input.raw.rates, 'Modelling_ID', line.mid);
+    const dated = (input.ratesByMid[line.mid] || []).length;
+    if (!dated) {
+      out.push({
+        rule: 'NO_RATE', severity: SEVERITY.ERROR,
+        hlId: line.hlId, modellingId: line.mid, month: '',
+        message: 'Line ' + line.mid + ' (' + line.label + ') has ' +
+          (rateRows
+            ? rateRows + ' active rate card row(s), none with a From and To date the portal can ' +
+              'read. The engine skips a row it cannot date, so this line is costed at zero.'
+            : 'no active rate card row at all, so it is costed at zero — which in Output looks ' +
+              'exactly like a component switched off on purpose.')
+      });
+    }
+
+    const mixRows = countActive(input.raw.mixes, 'Modelling_ID', line.mid);
+    const datedMix = (input.mixByMid[line.mid] || []).length;
+    if (!datedMix) {
+      out.push({
+        rule: 'NO_COMP_MIX', severity: SEVERITY.WARN,
+        hlId: line.hlId, modellingId: line.mid, month: '',
+        message: 'Line ' + line.mid + ' (' + line.label + ') has ' +
+          (mixRows
+            ? mixRows + ' active component mix row(s), none with a readable From and To date, ' +
+              'so none of them is applied.'
+            : 'no active component mix row, so nothing of it ships and it costs nothing. ' +
+              'That is correct if the component is not in use yet.')
+      });
+    }
+  });
+
+  /* Per High Level ID rather than per line: cold chain is a property of the High
+     Level ID, and reporting it once per line under it says the same thing five
+     times. Only High Level IDs that actually have a live line are worth asking
+     about. */
+  const hlWithLines = {};
+  input.lines.forEach(l => hlWithLines[l.hlId] = true);
+  Object.keys(hlWithLines).sort((a, b) => safeNum(a) - safeNum(b)).forEach(hlId => {
+    if (countActive(input.raw.ccMix, 'High_Level_ID', hlId)) return;
+    out.push({
+      rule: 'NO_CC_MIX', severity: SEVERITY.INFO,
+      hlId: hlId, modellingId: '', month: '',
+      message: vHlLabel_(input.hlById[hlId]) + ' has no active cold chain mix row, so it is ' +
+        'treated as 0% cold chain. Correct if everything under it ships ambient; if not, any ' +
+        'rate flagged CC is being weighted to nothing.'
+    });
+  });
+}
 
 /**
  * MIX_SUM — a split that does not total 100%.
@@ -407,16 +830,25 @@ function ruleRangeGap_(input, out) {
       const covered = input.months.map(mo => rows.some(r => r._f < mo.me && r._t > mo.ms));
       const first = covered.indexOf(true), last = covered.lastIndexOf(true);
 
-      /* Nothing anywhere in the horizon. Not a gap — the line contributes nothing
-         at all — but an active line with no assumptions is worth saying out loud.
-         Overlaps computeCompleteness_ on the dashboard, deliberately: this one is
-         horizon-aware, that one is not. */
+      /* A line with NO rows of this kind at all belongs to NO_RATE / NO_COMP_MIX,
+         which say the same thing with the severity the gap deserves — an ERROR
+         for a missing rate, a WARN for a missing mix. Reporting it here as well
+         would give one line two findings for one problem. */
+      if (!rows.length) return;
+
+      /* Rows exist, but every one of them falls outside the horizon. Not a gap —
+         there is nothing to have a gap between — and not the same thing as having
+         none at all: the assumptions were written, for a period the forecast no
+         longer covers. Usually a horizon that moved on and a rate card that did
+         not follow it. */
       if (first < 0) {
         out.push({
           rule: 'RANGE_GAP', severity: SEVERITY.WARN,
           hlId: line.hlId, modellingId: line.mid, month: input.months[0].date,
-          message: 'Line ' + line.mid + ' (' + line.label + ') has no active ' + k.what +
-                   ' anywhere in the horizon, so it contributes nothing to the forecast.'
+          message: 'Line ' + line.mid + ' (' + line.label + ') has ' + rows.length + ' active ' +
+                   k.what + '(s), but every one of them is outside the forecast horizon (' +
+                   input.months[0].label + ' to ' + input.months[input.months.length - 1].label +
+                   '), so the line contributes nothing.'
         });
         return;
       }
