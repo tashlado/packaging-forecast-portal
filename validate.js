@@ -71,6 +71,7 @@ function runValidationCore_(computedOutputRows) {
   const findings = [];
 
   ruleMixSum_(input, findings);
+  ruleMixOverlap_(input, findings);
   ruleRateMissing_(input, findings);
   ruleRangeGap_(input, findings);
   ruleOutputSwing_(input, computedOutputRows, findings);
@@ -265,6 +266,50 @@ function ruleMixSum_(input, out) {
                  '% instead of 100%. Mix IDs ' +
                  covering.map(r => r.Mix_ID).join(', ') + '.'
       });
+    }
+  });
+}
+
+/**
+ * MIX_OVERLAP — two active mix rows of one line covering the same day.
+ *
+ * saveComponentMixGroup refuses this outright ("Line X has overlapping mix date
+ * ranges"), so anything here arrived by a route that does not go through it: an
+ * import, a migration, or somebody typing in the Sheet.
+ *
+ * It matters because the engine ADDS overlapping mix rows rather than replacing
+ * them — computeAll_ does `cm += safeNum(x.Mix)` — so an overlap does not mean
+ * "the later row wins", it means the component is costed at the sum of both.
+ *
+ * MIX_SUM catches this only when the sum lands away from 100%. The case it
+ * cannot see is the one that matters most: an old row at 1.0 left open under a
+ * new row at 0, which sums to 1.0 and looks perfectly valid, while what the
+ * person meant was to switch the component OFF. It stays on, silently, and no
+ * total anywhere looks wrong.
+ */
+function ruleMixOverlap_(input, out) {
+  input.lines.forEach(line => {
+    const rows = (input.mixByMid[line.mid] || [])
+      .filter(r => r._f < input.hEndMs && r._t > input.hStartMs)
+      .slice().sort((a, b) => a._f - b._f);
+    /* Adjacent pairs after sorting by start, exactly as mixes.js checks them —
+       the point is to re-derive the same invariant, not a stricter one. One
+       finding per line: a line with a run of overlaps has one thing wrong with
+       it, and listing every pair buries the other lines. */
+    for (let i = 1; i < rows.length; i++) {
+      const a = rows[i - 1], b = rows[i];
+      if (b._f >= a._t) continue;
+      const span = r => vDayStr_(r._f) + ' → ' + vDayStr_(r._t - DAY_MS) + ' at ' + safeNum(r.Mix);
+      out.push({
+        rule: 'MIX_OVERLAP', severity: SEVERITY.ERROR,
+        hlId: line.hlId, modellingId: line.mid, month: vMonthOf_(Math.max(b._f, input.hStartMs)),
+        message: 'Line ' + line.mid + ' (' + line.label + '): mix #' + a.Mix_ID + ' (' + span(a) +
+                 ') and mix #' + b.Mix_ID + ' (' + span(b) + ') both cover ' + vDayStr_(b._f) +
+                 ' onwards. The engine adds overlapping mix rows rather than replacing them, so ' +
+                 'this line is costed at ' + (safeNum(a.Mix) + safeNum(b.Mix)) + ' from that date. ' +
+                 'Close mix #' + a.Mix_ID + ' the day before mix #' + b.Mix_ID + ' starts.'
+      });
+      return;
     }
   });
 }

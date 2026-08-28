@@ -154,6 +154,7 @@ be lifted on purpose.
 |---|---|---|
 | `RATE_MISSING` | ERROR | a segment whose component mix is above zero with no `Rate_Card` row covering a given **customer type** — costs nothing, and in `Output` is indistinguishable from a component switched off on purpose |
 | `MIX_SUM` | ERROR | the 100%-per-group invariant, re-derived over the whole `Component_Mix` table, clipped to the horizon |
+| `MIX_OVERLAP` | ERROR | two active mix rows of one line covering the same day. The engine ADDS overlapping rows (`cm += Mix`), so an overlap is not a replacement — and MIX_SUM cannot see the worst case, an old row at 1.0 left open under a new one at 0, which sums to a valid 100% while the component the person tried to switch off stays on |
 | `RANGE_GAP` | WARN | a month with no active rate or mix row **inside a line's own covered period**, or a line with nothing anywhere in the horizon |
 | `OUTPUT_SWING` | WARN | cost moving more than `VALIDATION_SWING_PCT` month on month, per High Level ID × customer type, ignoring transition months |
 | `SWING_SKIPPED` | INFO | how many swing comparisons were skipped as transition months |
