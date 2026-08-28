@@ -499,6 +499,7 @@ Harnesses built so far — rebuild rather than reinvent:
 | `deniedtest.js` | the DENIED audit row every gate writes, and the paths that must write none |
 | `smoketest.js` | `initApp` / `loadAllAppData` for each role, asserting no spurious refusals |
 | `headertest.js` | the header actions: what each role is shown, the tab switch, prompt ordering, re-enabling |
+| `outputtest.js` | the Output screen: columns, the six filters, `Date_ID`, the cost cell, and the baseline's move to Snapshots |
 | `patch.js` | exact-string file edits that survive CRLF — the `.js` files are CRLF, `index.html` is LF |
 
 Seven gotchas cost time:
@@ -571,9 +572,11 @@ Do not reintroduce `.btn.link.danger`; nothing is both a link and destructive.
 in the header so they are reachable from any tab — Recalculate is the step that makes an
 assumption edit reach Output at all, so it is most wanted from wherever the edit was made.
 Ported from the Postage portal's function of the same name. Neither action is portable on
-its own: `doRecalc` drives `#recalcBtn` and `showOk` writes into whichever screen is on,
-both of which live on the Output tab. So `gotoOutputThen(fn)` switches there first and then
-runs the same function, which also leaves you looking at the table about to change.
+its own: `showOk` writes into whichever screen is on, and the answer belongs next to the
+table it changed. So `gotoOutputThen(fn)` switches there first and then runs the same
+function, which leaves you looking at what moved. (Output no longer carries its own
+Recalculate button, so `recalcButtons()` usually finds only the header's — it was always
+written to tolerate either being absent.)
 Snapshot asks for its name **before** switching, so cancelling leaves you where you were —
 hence `doSnapshot(presetName)` and its `typeof` guard, which stops a DOM Event being taken
 for a name. `doRecalc` drives whichever Recalculate buttons exist (`recalcButtons()`) and
@@ -605,6 +608,33 @@ state lives in `TBL[id]` and the render function to call back in `TBL_RENDER[id]
 The Rate Card flattens Brand, Geo, Treatment and Component onto each row (`rateRowsAll()`) —
 they live on the line's High Level ID and its component, and they are exactly what people filter
 by. Buried inside one "Line" label they could only be matched as free text and not sorted at all.
+
+**The Output screen is a reading view, and deliberately thin.** One control above the table —
+Export CSV — and nine of Output's fourteen columns: High Level ID, Date ID, Brand, Geo,
+Treatment Type, Detail, Customer Type, Date, Cost. Recalculate and Snapshot are in the header,
+the variance baseline is on the Snapshots screen, and `tToolbar`'s row count and
+"Clear filters & sort" are gone with them. Four things to know before changing it:
+
+- **`Date_ID` is derived, not stored.** The Postage portal reads it from a `DIM_CALENDAR`
+  tab; packaging has no calendar table, so `outputAllRows()` computes the month's position in
+  the horizon, 1-based from `HORIZON_START`, via `monthIndex()`. It therefore **renumbers if
+  `HORIZON_START` moves** — it names a month within the horizon as it currently stands and is
+  not a key to store against. That is why it is absent from the CSV, and why the header says so
+  on hover. Blank, never a guess, when the horizon is unset or the month will not parse.
+- **The currency lives inside the cost cell**, not in a column. Packaging is multi-currency
+  where postage is GBP-only, and a column of bare numbers mixing GBP with USD is a number
+  nobody can read. `Cost_Local` keeps `type:'num'`, so the `cell` renderer changes what is
+  shown without touching how it sorts.
+- **Six filters, all `pick`**: Brand, Geo, Treatment Type, Detail, Customer Type, Date. An id
+  and a cost are things you sort, not things you pick from a list. `Detail` is `WL_Detail`
+  (postage calls the same dimension WL Split); `Date` is `Month`, normalised to `yyyy-mm`
+  so the pick list offers one entry per month.
+- **The CSV is the record, the table is the view.** `OUTPUT_CSV_COLS` still exports all
+  fourteen stored columns including `Cost_GBP` and the variance ones. An export that mirrored
+  the table would drop exactly what downstream extracts are taken for. Export CSV is a single
+  button, and **shift-click** puts the CSV on screen instead of downloading it — the escape
+  hatch that the removed Copy button used to be, kept because `downloadCsv` cannot tell when
+  the iframe has swallowed a download and its toast is the only place it is documented.
 
 - `modal(title, body, footer, wide)` builds the overlay and returns `{hide}`; `closeModal()`
   dismisses it. `mfield`/`mselect`/`mselectRaw`/`modalActs` build the 4-column field grid — span
