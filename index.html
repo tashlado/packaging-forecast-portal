@@ -269,6 +269,7 @@ const TABS = [
   {id:'compmix',   label:'Component Mix'},
   {id:'ccmix',     label:'Cold Chain'},
   {id:'output',    label:'Output'},
+  {id:'snapshots', label:'Snapshots'},
   {id:'validation',label:'Validation'},
   {id:'dims',      label:'Lookups', admin:true},
   /* Gated on the Can_View_Audit capability rather than on Admin rank, so change
@@ -465,8 +466,8 @@ window.addEventListener('resize', () => {
 
 function renderActive(){
   const r={dashboard:renderDashboard, rates:renderRates, compmix:renderCompMix,
-           ccmix:renderCCMix, output:renderOutput, validation:renderValidation,
-           dims:renderDims, history:renderHistory};
+           ccmix:renderCCMix, output:renderOutput, snapshots:renderSnapshots,
+           validation:renderValidation, dims:renderDims, history:renderHistory};
   (r[APP.activeTab]||function(){})();
 }
 function pane(id){ return document.getElementById('pane-'+id); }
@@ -1425,8 +1426,11 @@ function doSnapshot(){
   if(!name) return;
   run('createSnapshot',[name], resp=>{
     APP.ref.snapshots.push(resp.name);
+    /* The Snapshots screen holds its own list; a new one has to drop it or the
+       snapshot just taken is missing from the picker that would compare it. */
+    SNAPS=null;
     showOk('Snapshot "'+resp.name+'" saved ('+resp.rows+' rows)');
-    renderOutput();
+    renderActive();
   }, null, true);
 }
 function changeCompareSnapshot(name){
@@ -1930,6 +1934,166 @@ function submitArea(id){
   run('saveArea',[{id:id,areaName:v('a_name'),outputMetricName:v('a_metric'),
     customerTypes:v('a_types'),active:v('a_active')}],
     ()=>{ closeModal(); showOk('Saved'); reloadRefAfterDim(); }, err=>showError(err.message), true);
+}
+
+/* ========================== snapshots ==========================
+   A snapshot is a frozen copy of Output under a name. The portal could already
+   pick ONE of them as the variance baseline on the Output tab; this is the
+   screen for browsing them and comparing any two.
+
+   The comparison people want most often is a snapshot against the forecast as
+   it stands, so that is what "now" is in the picker and what a fresh Compare
+   defaults to. */
+let SNAPS=null, SNAPDIFF=null, SNAPSEL={from:'', to:''};
+
+function renderSnapshots(){
+  if(notReady('snapshots')) return;
+  if(SNAPS===null){
+    SNAPS='loading';
+    run('listSnapshots',[], s=>{ SNAPS=s; if(APP.activeTab==='snapshots') renderSnapshots(); },
+        err=>{ SNAPS=[]; showError('Could not list snapshots: '+err.message); });
+  }
+  if(SNAPS==='loading'){
+    pane('snapshots').innerHTML='<div class="card"><div class="load">'+
+      '<span class="spinner"></span>Reading snapshots&hellip;</div></div>';
+    return;
+  }
+  const list=SNAPS||[];
+  const opts=(sel,withNow)=>
+    (withNow?'<option value="">The forecast as it stands now</option>':'')+
+    list.map(s=>'<option value="'+esc(s.name)+'"'+(sel===s.name?' selected':'')+'>'+
+      esc(s.name)+' — '+esc(s.createdAt)+'</option>').join('');
+  if(!SNAPSEL.from && list.length) SNAPSEL.from=list[0].name;
+
+  const table = list.length
+    ? '<div class="tablewrap"><table><thead><tr><th>Name</th><th>Taken</th><th>By</th>'+
+      '<th>Covers</th><th class="right">Segments</th><th class="right">Rows</th>'+
+      '<th class="right">Total (local)</th><th></th></tr></thead><tbody>'+
+      list.map(s=>'<tr'+(APP.config.compareSnapshot===s.name?' class="sel"':'')+'>'+
+        '<td>'+esc(s.name)+(APP.config.compareSnapshot===s.name?
+          ' <span class="pill">variance baseline</span>':'')+'</td>'+
+        '<td>'+esc(s.createdAt)+'</td><td class="small muted">'+esc(s.createdBy)+'</td>'+
+        '<td class="small">'+esc(s.firstMonth)+(s.lastMonth!==s.firstMonth?' to '+esc(s.lastMonth):'')+'</td>'+
+        '<td class="right num">'+s.segments+'</td><td class="right num">'+s.rows+'</td>'+
+        '<td class="right num">'+num(s.total,2)+'</td>'+
+        '<td class="rowacts"><button class="btn link" onclick="snapCompareWith('+
+          '\''+esc(s.name).replace(/'/g,"\\'")+'\')">Compare with now</button></td>'+
+        '</tr>').join('')+'</tbody></table></div>'+
+      /* Totals across snapshots taken at different points in a horizon are not
+         comparable as headline numbers, so the caveat travels with the column. */
+      '<div class="note small muted" style="padding:8px 16px">Total is the sum of every '+
+        'Cost_Local row in the snapshot. Two snapshots covering different months are not '+
+        'comparable on that figure alone — use Compare, which matches row for row.</div>'
+    : '<div class="empty">No snapshots yet.'+(isAdmin()
+        ? ' Take one from the Output tab to start the record.'
+        : ' An Admin can take one from the Output tab.')+'</div>';
+
+  pane('snapshots').innerHTML=
+    '<div class="card"><div class="body"><div class="row tight">'+
+    '<div class="field filter"><label>Compare</label><select id="snapFrom" '+
+      'onchange="SNAPSEL.from=this.value">'+opts(SNAPSEL.from,false)+'</select></div>'+
+    '<div class="field filter"><label>With</label><select id="snapTo" '+
+      'onchange="SNAPSEL.to=this.value">'+opts(SNAPSEL.to,true)+'</select></div>'+
+    '<button class="btn primary" id="snapGo" onclick="snapCompare()"'+
+      (list.length?'':' disabled')+'>Compare</button>'+
+    '<div class="spacer"></div>'+
+    (isAdmin()?'<button class="btn" onclick="doSnapshot()">Take a snapshot</button>':'')+
+    '</div>'+
+    '<div class="hint">A snapshot freezes the whole Output tab under a name. Comparing one '+
+      'with <b>now</b> is how you see what has moved since it was taken; comparing two says '+
+      'what happened between them.</div>'+
+    '</div></div>'+
+    '<div class="card"><h2>Snapshots</h2>'+table+'</div>'+
+    '<div id="snapDiff">'+(SNAPDIFF?snapDiffHtml(SNAPDIFF):'')+'</div>';
+}
+
+function snapCompareWith(name){
+  SNAPSEL.from=name; SNAPSEL.to='';
+  renderSnapshots();
+  snapCompare();
+}
+function snapCompare(){
+  if(!SNAPSEL.from) return showError('Pick a snapshot to compare from.');
+  if(SNAPSEL.from===SNAPSEL.to) return showError('Those are the same snapshot.');
+  const host=document.getElementById('snapDiff');
+  if(host) host.innerHTML='<div class="card"><div class="load">'+
+    '<span class="spinner"></span>Comparing&hellip;</div></div>';
+  run('compareSnapshots',[SNAPSEL.from, SNAPSEL.to], d=>{
+    SNAPDIFF=d;
+    const h=document.getElementById('snapDiff');
+    if(h) h.innerHTML=snapDiffHtml(d);
+  }, err=>{
+    SNAPDIFF=null;
+    const h=document.getElementById('snapDiff');
+    if(h) h.innerHTML='<div class="card"><div class="body"><div class="err-box" '+
+      'style="margin:0">'+esc(err.message)+'</div></div></div>';
+  });
+}
+/* A number with its sign, coloured the way the Output tab colours variance: a
+   cost going up is the bad direction, so it is red. */
+function snapMove(v, dp){
+  if(v===null||v===undefined||v==='') return '<span class="muted">&mdash;</span>';
+  const n=Number(v);
+  const cls = n>0.00005 ? 'up' : n<-0.00005 ? 'down' : 'muted';
+  return '<span class="'+cls+'">'+(n>0?'+':'')+num(n,dp===undefined?4:dp)+'</span>';
+}
+function snapPct(v){
+  if(v===null||v===undefined) return '';
+  return ' <span class="small muted">('+(v>0?'+':'')+Number(v).toFixed(1)+'%)</span>';
+}
+function snapDiffHtml(d){
+  const stat=(label,val,cls)=>'<div style="min-width:110px"><div class="small muted">'+label+
+    '</div><div class="stat num'+(cls?' '+cls:'')+'">'+val+'</div></div>';
+  let h='<div class="card"><h2>'+esc(d.fromName)+' compared with '+esc(d.toLabel)+'</h2>'+
+    '<div class="body"><div class="row tight" style="gap:28px;align-items:flex-start">'+
+    stat('Rows changed', d.changed, d.changed?'up':'')+
+    stat('Unchanged', d.unchanged)+
+    stat('New rows', d.added)+
+    stat('Gone', d.removed)+
+    '<div class="spacer"></div>'+
+    stat('Total movement', snapMove(d.totalDiff,2))+
+    '</div>';
+  if(!d.changed){
+    h+='<div class="ok-box" style="margin:12px 0 0">Identical. Nothing about the rates or '+
+       'mixes has moved the forecast between these two points.</div>';
+  } else if(d.added||d.removed){
+    /* A row on one side only is not a change from zero, and saying so stops the
+       reader treating "gone" as a cost saving. */
+    h+='<div class="note small muted" style="padding:12px 0 0">'+
+       (d.added?d.added+' row(s) exist only in '+esc(d.toLabel)+'. ':'')+
+       (d.removed?d.removed+' row(s) existed in '+esc(d.fromName)+' and no longer do. ':'')+
+       'Those are counted separately from the movement figure — a segment that did not exist '+
+       'has not gone up from zero.</div>';
+  }
+  h+='</div>';
+
+  if(d.segments.length){
+    h+='<div class="tablewrap" style="border-top:1px solid var(--line)"><table><thead><tr>'+
+      '<th>Segment</th><th class="right">Months affected</th><th class="right">Total move</th>'+
+      '<th class="right">Mean per month</th></tr></thead><tbody>'+
+      d.segments.map(s=>'<tr><td>'+esc(s.label)+'</td>'+
+        '<td class="right num">'+s.months+'</td>'+
+        '<td class="right num">'+snapMove(s.totalDiff,2)+(s.pct===null?'':snapPct(s.pct))+'</td>'+
+        '<td class="right num">'+snapMove(s.meanDiff)+'</td></tr>').join('')+
+      '</tbody></table></div>';
+  }
+
+  if(d.diffs.length){
+    h+='<div class="fsplit" style="margin:0;padding:14px 16px 10px">Row by row'+
+      '<span>biggest movers first</span></div>'+
+      '<div class="tablewrap"><table><thead><tr><th>Segment</th><th>Month</th><th>Type</th>'+
+      '<th class="right">'+esc(d.fromName)+'</th><th class="right">'+esc(d.toLabel)+'</th>'+
+      '<th class="right">Change</th></tr></thead><tbody>'+
+      d.diffs.map(r=>'<tr><td>'+esc(r.label)+'</td><td>'+esc(r.month)+'</td>'+
+        '<td>'+esc(r.customerType)+'</td>'+
+        '<td class="right num">'+(r.before===null?'<span class="muted">new</span>':num(r.before))+'</td>'+
+        '<td class="right num">'+(r.after===null?'<span class="muted">gone</span>':num(r.after))+'</td>'+
+        '<td class="right num">'+snapMove(r.diff)+(r.pct===null?'':snapPct(r.pct))+'</td>'+
+        '</tr>').join('')+'</tbody></table></div>';
+    if(d.truncated) h+='<div class="note small muted" style="padding:8px 16px">Showing the '+
+      d.diffs.length+' largest of '+(d.diffs.length+d.truncated)+' changed rows.</div>';
+  }
+  return h+'</div>';
 }
 
 /* ==================== one record's history ====================

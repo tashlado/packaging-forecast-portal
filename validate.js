@@ -130,10 +130,9 @@ function vMonthOf_(ms) {
   const d = new Date(ms);
   return new Date(d.getUTCFullYear(), d.getUTCMonth(), 1);
 }
-function vHlLabel_(h) {
-  if (!h) return '?';
-  return [h.Brand, h.Geo, h.Treatment_Type, h.WL_Detail].filter(x => x && x !== '*').join(' ');
-}
+/* hlLabel_ with a '?' for a High Level ID that is not there at all, which in a
+   validation message is itself the finding. */
+function vHlLabel_(h) { return h ? hlLabel_(h) : '?'; }
 
 function validationInput_() {
   const cfg = getConfig_();

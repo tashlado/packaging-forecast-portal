@@ -152,6 +152,15 @@ function dayStr(d) {
 function addDays(d, n) { const x = new Date(d); x.setDate(x.getDate() + n); return x; }
 function monthKey(d) { return dayStr(d).slice(0, 7); }
 
+/* "Brand A GB Weight Loss" from a High_Level_IDs row. A '*' means the dimension
+   does not apply to this segment rather than being unset, so it is dropped
+   rather than printed. Lives here because validate.js, snapshots.js, bulk.js and
+   the client all need the same sentence, and three of them had their own copy. */
+function hlLabel_(h) {
+  if (!h) return '';
+  return [h.Brand, h.Geo, h.Treatment_Type, h.WL_Detail].filter(x => x && x !== '*').join(' ');
+}
+
 /* ---------- locking & IDs ---------- */
 function withLock(fn) {
   const lock = LockService.getScriptLock();
