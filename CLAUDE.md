@@ -152,10 +152,37 @@ be lifted on purpose.
 
 | Rule | Sev | What it catches |
 |---|---|---|
-| `RATE_MISSING` | ERROR | a segment whose component mix is above zero with no `Rate_Card` row in force — costs nothing, and in `Output` is indistinguishable from a component switched off on purpose |
-| `MIX_SUM` | ERROR | the 100%-per-group invariant, re-derived over the whole `Component_Mix` table |
-| `RANGE_GAP` | WARN | a horizon month with no active rate or mix row at all |
-| `OUTPUT_SWING` | WARN | cost moving more than `VALIDATION_SWING_PCT` month on month, per High Level ID × customer type |
+| `RATE_MISSING` | ERROR | a segment whose component mix is above zero with no `Rate_Card` row covering a given **customer type** — costs nothing, and in `Output` is indistinguishable from a component switched off on purpose |
+| `MIX_SUM` | ERROR | the 100%-per-group invariant, re-derived over the whole `Component_Mix` table, clipped to the horizon |
+| `RANGE_GAP` | WARN | a month with no active rate or mix row **inside a line's own covered period**, or a line with nothing anywhere in the horizon |
+| `OUTPUT_SWING` | WARN | cost moving more than `VALIDATION_SWING_PCT` month on month, per High Level ID × customer type, ignoring transition months |
+| `SWING_SKIPPED` | INFO | how many swing comparisons were skipped as transition months |
+| `TRUNCATED` | INFO | a rule hit `VALIDATION_MAX_PER_RULE` and the rest are not listed |
+
+**Every one of these boundaries was drawn to keep the rule reporting things a
+person can act on. Do not widen one without re-reading why it is where it is:**
+
+- `RATE_MISSING` matches customer type the way `computeAll_` does (`All` serves
+  every type; anything else only its own) and deliberately **ignores `CC_Flag`**,
+  because in the engine that is a *weight*, not a filter — `w = cc | 1-cc | 1` —
+  so a `CC` row and a `Both` row are equally present. A CC-only rate under 0%
+  cold chain really does compute zero, but that is the cold-chain mix saying
+  nothing shipped cold, which is an answer rather than a missing rate.
+- `MIX_SUM` clips to the horizon; `saveComponentMixGroup` does not, because it is
+  checking one payload a person just typed. An archive of superseded 2024 rows
+  cannot make a 2026 number wrong, and left in it errors every run forever.
+- `RANGE_GAP` reports only holes *between* the first and last covered month.
+  Months before a line starts or after it ends are its scope: a component that
+  begins shipping in April is supposed to have no March rate, and reporting that
+  for every deliberately-scoped line buries the real holes.
+- `OUTPUT_SWING` skips any comparison where either month contains a rate or mix
+  boundary. The engine day-weights a part month, so a line starting on the 20th
+  bills 12/31 of January and then reads **+158%** into February; one starting on
+  28 Feb reads **+2700%** into March. The `prev > 0` guard catches the
+  zero-to-part-month step but not the part-month-to-full-month step after it.
+  A mid-month change that is genuinely wrong still surfaces one month later, in
+  the first full-month comparison. `scratchpad/swingprobe.js` demonstrates all of
+  this against the real engine.
 
 Two things to keep in mind when adding a rule:
 
@@ -234,8 +261,10 @@ uploads every root `.js` as a `.gs`, and `.clasp.json` sets `skipSubdirectories:
 `test/` folder would go up too.
 
 Harnesses built so far: `gasenv.js` (the fake host), `bulktest.js` (bulk.js, 58 assertions),
-`validatetest.js` (the rule pack and the audit diff, 64 assertions) and `clienttest.js` (the
-pure functions inside `index.html`'s `<script>` — CSV builder, picker markup — 32 assertions).
+`validatetest.js` (the rule pack and the audit diff, 79 assertions), `clienttest.js` (the pure
+functions inside `index.html`'s `<script>` — CSV builder, picker markup — 32 assertions) and
+`swingprobe.js` (runs the real `computeAll_` over a mid-month launch and shows what
+`OUTPUT_SWING` does with the rows it produces).
 Rebuild rather than reinvent; four gotchas cost time:
 
 - `Date` objects created inside the `vm` context fail `instanceof Date` in the host realm, and

@@ -150,6 +150,13 @@ function validationInput_() {
   const compById = {};
   tableToObjects_(SHEET.COMPONENTS).forEach(c => compById[c.Component_ID] = c);
 
+  /* Built exactly as computeAll_ builds it, including the fallback, so a line's
+     customer types here are the ones it is actually costed against. */
+  const areaTypes = {};
+  tableToObjects_(SHEET.AREAS).filter(a => isActive(a.Active)).forEach(a => {
+    areaTypes[a.Area_ID] = safeStr(a.Customer_Types).split(',').map(x => x.trim()).filter(Boolean);
+  });
+
   /* Same population the engine costs: active lines whose High Level ID is active.
      A line hanging off a deactivated parent is not in the forecast, so a gap in
      its assumptions is not a defect. */
@@ -157,9 +164,12 @@ function validationInput_() {
     .filter(l => isActive(l.Active) && hlById[l.High_Level_ID])
     .map(l => {
       const c = compById[l.Component_ID];
+      const hl = hlById[l.High_Level_ID];
+      const types = areaTypes[hl.Area_ID];
       return {
         mid: l.Modelling_ID,
         hlId: l.High_Level_ID,
+        types: (types && types.length) ? types : ['New', 'Repeat', 'OTC'],
         hlComponent: safeStr(c && c.High_Level_Component),
         label: vHlLabel_(hlById[l.High_Level_ID]) + ' — ' +
                (c ? safeStr(c.Component) : 'component ' + l.Component_ID)
@@ -172,10 +182,33 @@ function validationInput_() {
   vDated_(tableToObjects_(SHEET.COMP_MIX).filter(r => isActive(r.Active)))
     .forEach(r => (mixByMid[r.Modelling_ID] = mixByMid[r.Modelling_ID] || []).push(r));
 
+  /* A month with a rate or component-mix boundary inside it is a TRANSITION
+     month. The engine day-weights it — a line starting on the 20th bills 12/31 of
+     January — so its total is a fraction of a monthly run rate rather than a run
+     rate, and comparing one against a full month measures the calendar rather
+     than the assumptions. Keyed High_Level_ID|monthStart, because Output is
+     aggregated to the High Level ID and any one of its lines moving mid-month is
+     enough to make that month partial. */
+  const partialMonths = {};
+  lines.forEach(line => {
+    (ratesByMid[line.mid] || []).concat(mixByMid[line.mid] || []).forEach(r => {
+      months.forEach(mo => {
+        if ((r._f > mo.ms && r._f < mo.me) || (r._t > mo.ms && r._t < mo.me)) {
+          partialMonths[String(line.hlId) + '|' + mo.ms] = true;
+        }
+      });
+    });
+  });
+
   const swingRaw = Number(cfg.VALIDATION_SWING_PCT);
   return {
+    partialMonths: partialMonths,
     months: months, lines: lines, hlById: hlById, compById: compById,
     ratesByMid: ratesByMid, mixByMid: mixByMid,
+    /* The forecast window as [hStartMs, hEndMs) in UTC-day ms. Rules that walk
+       raw row dates rather than input.months clip to it — nothing outside the
+       horizon reaches Output, so nothing outside it can make Output wrong. */
+    hStartMs: utcDay_(hStart), hEndMs: utcDay_(hEnd) + DAY_MS,
     swingPct: (isNaN(swingRaw) || swingRaw <= 0) ? VALIDATION_SWING_PCT_DEFAULT : swingRaw
   };
 }
@@ -212,6 +245,12 @@ function ruleMixSum_(input, out) {
     const bounds = Object.keys(bset).map(Number).sort((a, b) => a - b);
     for (let i = 0; i < bounds.length - 1; i++) {
       const s = bounds[i];
+      /* Segments wholly outside the horizon are history. saveComponentMixGroup
+         checks them because it is validating one payload a person just typed;
+         this is asking whether the FORECAST is wrong, and a split that was 90%
+         in 2024 cannot make a 2026 number wrong. Left in, an archive of superseded
+         rows reports as an error every run and nobody can act on it. */
+      if (bounds[i + 1] <= input.hStartMs || s >= input.hEndMs) continue;
       const covering = g.rows.filter(r => r._f <= s && s < r._t);
       const nonZero = covering.filter(r => safeNum(r.Mix) > 0);
       if (nonZero.length < 2) continue;
@@ -248,6 +287,7 @@ function ruleRateMissing_(input, out) {
     if (!mixes.length) return;                  // no mix at all is RANGE_GAP's business
     const rates = input.ratesByMid[line.mid] || [];
     let days = 0, monthsHit = 0, firstMonth = null;
+    const typesHit = {};
 
     input.months.forEach(mo => {
       const bset = {};
@@ -264,19 +304,40 @@ function ruleRateMissing_(input, out) {
         let cm = 0;
         for (const x of mixes) if (x._f <= s && s < x._t) cm += safeNum(x.Mix);
         if (cm <= 0) continue;
-        if (rates.some(r => r._f <= s && s < r._t)) continue;
+
+        /* Coverage is per CUSTOMER TYPE, matched the way computeAll_ matches it:
+           an 'All' row serves every type of the area, anything else only its own.
+           A line priced for New but not Repeat costs Repeat nothing, and asking
+           only "is there any rate at all" would call that covered.
+
+           CC_Flag is deliberately NOT part of this. In the engine it is a weight,
+           not a filter — w = cc | 1-cc | 1 — so a CC row and a Both row are both
+           present. A CC-only rate under 0% cold chain does compute zero, but that
+           is the cold chain mix saying nothing shipped cold, which is an answer,
+           not a missing rate. */
+        const inForce = rates.filter(r => r._f <= s && s < r._t);
+        const uncovered = line.types.filter(t => !inForce.some(r => {
+          const ct = safeStr(r.Customer_Type);
+          return ct === 'All' || ct === t;
+        }));
+        if (!uncovered.length) continue;
+        uncovered.forEach(t => typesHit[t] = true);
         hit += (bounds[i + 1] - s) / DAY_MS;
       }
       if (hit) { days += hit; monthsHit++; if (!firstMonth) firstMonth = mo; }
     });
 
     if (!monthsHit) return;
+    const missing = Object.keys(typesHit);
+    const whose = missing.length === line.types.length
+      ? 'no rate card row in force'
+      : 'no rate card row covering ' + missing.sort().join('/');
     out.push({
       rule: 'RATE_MISSING', severity: SEVERITY.ERROR,
       hlId: line.hlId, modellingId: line.mid, month: firstMonth.date,
       message: 'Line ' + line.mid + ' (' + line.label + ') has a component mix above zero for ' +
-               days + ' day(s) across ' + monthsHit + ' month(s) with no rate card row in force, ' +
-               'starting ' + firstMonth.label + '. Those days cost nothing in the forecast.'
+               days + ' day(s) across ' + monthsHit + ' month(s) with ' + whose + ', starting ' +
+               firstMonth.label + '. Those days cost nothing in the forecast.'
     });
   });
 }
@@ -298,14 +359,42 @@ function ruleRangeGap_(input, out) {
   input.lines.forEach(line => {
     kinds.forEach(k => {
       const rows = k.rows[line.mid] || [];
-      const gaps = input.months.filter(mo => !rows.some(r => r._f < mo.me && r._t > mo.ms));
-      if (!gaps.length) return;
+      const covered = input.months.map(mo => rows.some(r => r._f < mo.me && r._t > mo.ms));
+      const first = covered.indexOf(true), last = covered.lastIndexOf(true);
+
+      /* Nothing anywhere in the horizon. Not a gap — the line contributes nothing
+         at all — but an active line with no assumptions is worth saying out loud.
+         Overlaps computeCompleteness_ on the dashboard, deliberately: this one is
+         horizon-aware, that one is not. */
+      if (first < 0) {
+        out.push({
+          rule: 'RANGE_GAP', severity: SEVERITY.WARN,
+          hlId: line.hlId, modellingId: line.mid, month: input.months[0].date,
+          message: 'Line ' + line.mid + ' (' + line.label + ') has no active ' + k.what +
+                   ' anywhere in the horizon, so it contributes nothing to the forecast.'
+        });
+        return;
+      }
+
+      /* Only the holes BETWEEN the first and last covered month. Months before a
+         line starts or after it ends are its scope, not a defect: a component
+         that begins shipping in April is supposed to have no April-preceding rate,
+         and reporting that every month of every deliberately-scoped line buries
+         the real holes under an unreadable pile of them.
+
+         A hole in the middle is different — the line was priced, stopped being
+         priced, and was priced again, which is either an expiry nobody renewed or
+         a date typed wrong. */
+      const holes = [];
+      for (let i = first + 1; i < last; i++) if (!covered[i]) holes.push(input.months[i]);
+      if (!holes.length) return;
       out.push({
         rule: 'RANGE_GAP', severity: SEVERITY.WARN,
-        hlId: line.hlId, modellingId: line.mid, month: gaps[0].date,
+        hlId: line.hlId, modellingId: line.mid, month: holes[0].date,
         message: 'Line ' + line.mid + ' (' + line.label + ') has no active ' + k.what + ' for ' +
-                 gaps.length + ' of the ' + input.months.length + ' month(s) in the horizon, ' +
-                 'starting ' + gaps[0].label + '.'
+                 holes.length + ' month(s) inside its own covered period (' +
+                 input.months[first].label + ' to ' + input.months[last].label + '), starting ' +
+                 holes[0].label + '.'
       });
     });
   });
@@ -331,11 +420,26 @@ function ruleOutputSwing_(input, computedOutputRows, out) {
     (series[k] = series[k] || []).push(r);
   });
 
+  let skipped = 0;
   Object.keys(series).sort().forEach(k => {
     const s = series[k].sort((a, b) => a.ms - b.ms);
     for (let i = 1; i < s.length; i++) {
       const prev = s[i - 1].cost, cur = s[i].cost;
+      /* Nothing to move from. A component that starts shipping is not a defect. */
       if (!(prev > 0)) continue;
+
+      /* Neither month may be a transition month. Without this the rule reports
+         every launch twice over: the zero-to-partial step is caught by the guard
+         above, but the partial-to-first-full-month step right after it is not,
+         and it is enormous — a line starting 20 Jan reads +158%, one starting
+         28 Feb reads +2700%. Both are the calendar, not a price.
+
+         A mid-month change that IS wrong still surfaces, one month later, in the
+         first full-month comparison after it. Losing the transition month itself
+         is the price of not drowning every real finding in launches. */
+      if (input.partialMonths[s[i - 1].hlId + '|' + s[i - 1].ms] ||
+          input.partialMonths[s[i].hlId + '|' + s[i].ms]) { skipped++; continue; }
+
       const move = (cur - prev) / prev;
       if (Math.abs(move) <= threshold) continue;
       out.push({
@@ -348,6 +452,18 @@ function ruleOutputSwing_(input, computedOutputRows, out) {
       });
     }
   });
+
+  /* Said out loud rather than left implicit: a rule that quietly declines to look
+     at part of the data reads as a clean bill of health for it. */
+  if (skipped) {
+    out.push({
+      rule: 'SWING_SKIPPED', severity: SEVERITY.INFO, hlId: '', modellingId: '', month: '',
+      message: skipped + ' month-on-month comparison(s) were not checked for a swing because ' +
+               'one of the two months has a rate or mix change part-way through it, so its ' +
+               'total is a part month rather than a run rate. Full months either side of it ' +
+               'are still checked.'
+    });
+  }
 }
 
 /* Rows straight from computeAll_ — positional, so read the positions from
