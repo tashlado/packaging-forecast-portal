@@ -101,7 +101,16 @@ tbody tr:last-child td{border-bottom:none}
 tbody tr.sel{background:var(--brand-tint)}
 tbody tr.click{cursor:pointer}
 tbody tr.click:hover{background:var(--bg)}
+/* Row actions. One pattern everywhere they appear: .btn.sm, and .btn.sm.danger
+   for the destructive one. This file used to draw them as .btn.link — borderless
+   coloured text — which was a fork of a shared component: the Postage portal has
+   never had .btn.link and styles every row action as a small bordered pill. A
+   pill also reads as pressable where coloured text reads as a link, and the two
+   stylesheets are meant to stay one product, so the fork is the side that moved.
+   The gap is a rule rather than a literal space between the buttons, so a new
+   row action cannot be added without one. */
 td.rowacts{white-space:nowrap;text-align:right}
+td.rowacts .btn+.btn{margin-left:4px}
 .comment-cell{max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
 /* ---- sortable, filterable tables ----
@@ -140,10 +149,12 @@ tbody tr.sub td:first-child{padding-left:22px}
 .btn.danger{color:var(--err);border-color:#F0C9CF}
 .btn:disabled{opacity:.45;cursor:not-allowed}
 .btn.sm{padding:4px 9px;font-size:12px}
+/* A link inside a sentence, not a control in a row. Its one caller is the
+   "Show all" that lifts the table render cap, which sits mid-prose in a footer
+   cell and would read as a stray button if it were a pill. Row actions are
+   .btn.sm — see td.rowacts above. */
 .btn.link{border-color:transparent;background:none;color:var(--brand);padding:4px 6px;font-size:12px}
 .btn.link:hover{background:var(--brand-tint)}
-.btn.link.danger{color:var(--err)}
-.btn.link.danger:hover{background:#FDEBED}
 .field{display:flex;flex-direction:column;gap:4px}
 .field label{font-size:11px;color:var(--ink-3);letter-spacing:.04em}
 input[type=text],input[type=date],input[type=number],select{
@@ -881,11 +892,11 @@ const RATE_COLS = [
   {key:'Comment',       label:'Comment',   type:'str', filter:'text', cls:'comment-cell', title:true},
   {key:'_acts',         label:'',          sort:false, filter:null, cell:r=>
     '<td class="rowacts">'+
-      '<button class="btn link" onclick="openRecordHistory(\'Rate_Card\','+r.Rate_ID+
+      '<button class="btn sm" onclick="openRecordHistory(\'Rate_Card\','+r.Rate_ID+
         ',\'rate #'+r.Rate_ID+'\')" title="What this rate said on a given date">History</button>'+
       (canEditRates()?
-      '<button class="btn link" onclick="openRateModal('+r.Rate_ID+')">Edit</button>'+
-      '<button class="btn link danger" onclick="delRate('+r.Rate_ID+')">Delete</button>':'')+'</td>'}
+      '<button class="btn sm" onclick="openRateModal('+r.Rate_ID+')">Edit</button>'+
+      '<button class="btn sm danger" onclick="delRate('+r.Rate_ID+')">Delete</button>':'')+'</td>'}
 ];
 const RATE_RENDER_CAP = 600;
 
@@ -1351,9 +1362,9 @@ function renderMixEditor(){
       '<td class="rowacts">'+
         /* Only a saved row has an amend history; one added in this editor and not
            yet saved has no id to look up. */
-        (r.mixId?'<button class="btn link" onclick="openRecordHistory(\'Component_Mix\','+r.mixId+
+        (r.mixId?'<button class="btn sm" onclick="openRecordHistory(\'Component_Mix\','+r.mixId+
           ',\'mix #'+r.mixId+'\')">History</button>':'')+
-        '<button class="btn link danger" onclick="MIXEDIT.rows['+i+'].deleted=true;renderMixEditor()">Remove</button></td>'+
+        '<button class="btn sm danger" onclick="MIXEDIT.rows['+i+'].deleted=true;renderMixEditor()">Remove</button></td>'+
       '</tr>').join('')+
     '</tbody></table></div>';
   mixSumPreview();
@@ -1406,11 +1417,11 @@ function renderCCMix(){
       '<td class="right num">'+(Number(m.CC_Mix)*100).toFixed(1)+'%</td>'+
       '<td class="comment-cell" title="'+esc(m.Comment)+'">'+esc(m.Comment)+'</td>'+
       '<td class="rowacts">'+
-        '<button class="btn link" onclick="openRecordHistory(\'Cold_Chain_Mix\','+m.CC_Mix_ID+
+        '<button class="btn sm" onclick="openRecordHistory(\'Cold_Chain_Mix\','+m.CC_Mix_ID+
           ',\'cold chain #'+m.CC_Mix_ID+'\')">History</button>'+
         (canEditMixes()?
-        '<button class="btn link" onclick="openCCModal('+m.CC_Mix_ID+')">Edit</button>'+
-        '<button class="btn link danger" onclick="delCC('+m.CC_Mix_ID+')">Delete</button>':'')+'</td></tr>').join('')
+        '<button class="btn sm" onclick="openCCModal('+m.CC_Mix_ID+')">Edit</button>'+
+        '<button class="btn sm danger" onclick="delCC('+m.CC_Mix_ID+')">Delete</button>':'')+'</td></tr>').join('')
      :'<tr><td colspan="7" class="muted">No cold chain ranges yet.</td></tr>')+
     '</tbody></table></div></div>';
 }
@@ -1857,7 +1868,7 @@ function renderDims(){
   const mayEdit=canEditDims();
   const hl=APP.ref.highLevelIds, cp=APP.ref.components, ln=APP.ref.lines, ar=APP.ref.areas;
   const addBtn=(fn,label)=>mayEdit?'<button class="btn sm" onclick="'+fn+'">'+label+'</button>':'';
-  const editBtn=(fn)=>mayEdit?'<button class="btn link" onclick="'+fn+'">Edit</button>'
+  const editBtn=(fn)=>mayEdit?'<button class="btn sm" onclick="'+fn+'">Edit</button>'
                              :'<span class="muted small">read only</span>';
   pane('dims').innerHTML=
   (mayEdit?'':'<div class="warn-box">Your access does not include changing the dimension '+
@@ -1905,7 +1916,7 @@ function renderDims(){
     '</tr></thead><tbody>'+
     ar.map(a=>'<tr><td class="num">'+a.Area_ID+'</td><td>'+esc(a.Area_Name)+'</td>'+
       '<td>'+esc(a.Customer_Types)+'</td><td>'+esc(a.Active)+'</td>'+
-      '<td class="rowacts"><button class="btn link" onclick="editArea('+a.Area_ID+')">Edit</button></td>'+
+      '<td class="rowacts"><button class="btn sm" onclick="editArea('+a.Area_ID+')">Edit</button></td>'+
       '</tr>').join('')+'</tbody></table></div>'+
     '<div class="note small muted" style="padding:10px 16px">To add a future breakdown (e.g. Mounjaro Bundles): '+
       'add a High Level ID with the new WL Detail, then use <b>Copy from another</b> above to bring its '+
@@ -2219,7 +2230,7 @@ function renderSnapshots(){
         '<td class="small">'+esc(s.firstMonth)+(s.lastMonth!==s.firstMonth?' to '+esc(s.lastMonth):'')+'</td>'+
         '<td class="right num">'+s.segments+'</td><td class="right num">'+s.rows+'</td>'+
         '<td class="right num">'+num(s.total,2)+'</td>'+
-        '<td class="rowacts"><button class="btn link" onclick="snapCompareWith('+
+        '<td class="rowacts"><button class="btn sm" onclick="snapCompareWith('+
           '\''+esc(s.name).replace(/'/g,"\\'")+'\')">Compare with now</button></td>'+
         '</tr>').join('')+'</tbody></table></div>'+
       /* Totals across snapshots taken at different points in a horizon are not
