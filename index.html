@@ -1543,36 +1543,96 @@ function doValidate(){
   }, true);
 }
 
-/* ========================== lookups ========================== */
+/* ========================== lookups ==========================
+   Every table here shows what refers to each row, because the two things this
+   screen can do that nothing else can — rename a value other rows are matched
+   on, and switch a parent off — are both irreversible in effect and invisible
+   in the moment. The server refuses both while the count is above zero; the
+   count is here so nobody finds that out by being refused.
+
+   Loaded lazily and once: it walks Rate_Card, Component_Mix and Cold_Chain_Mix,
+   which the Lookups tab has no other reason to touch. */
+let DIMUSE=null;
+function dimUseLoad(){
+  if(DIMUSE) return;
+  DIMUSE='loading';
+  run('getDimensionUsage',[], u=>{ DIMUSE=u; if(APP.activeTab==='dims') renderDims(); },
+      err=>{ DIMUSE=null; showError('Could not load usage counts: '+err.message); });
+}
+function dimUse(kind, id){
+  return (DIMUSE && DIMUSE!=='loading' && DIMUSE[kind+'|'+id]) || null;
+}
+/* The count, with the breakdown on hover. An em dash for nothing, an ellipsis
+   while it is still loading — a bare 0 would read as an answer. */
+function useCell(kind, id){
+  if(DIMUSE==='loading' || DIMUSE===null) return '<td class="right num muted">&hellip;</td>';
+  const u=dimUse(kind,id);
+  if(!u || !u.total) return '<td class="right num muted">&mdash;</td>';
+  const tip=u.where.map(w=>w.count+' '+w.what+(w.count===1?'':'s')+
+    (w.active<w.count?' ('+w.active+' active)':'')).join(', ');
+  return '<td class="right num'+(u.active?'':' muted')+'" title="'+esc(tip)+'">'+u.total+'</td>';
+}
+/* The sentence an edit form opens with. Says what is locked before anything is
+   typed, rather than after the save comes back refused. */
+function useIntro(kind, id, what){
+  if(!id) return 'Nothing refers to this yet, so everything about it can still be corrected.';
+  const u=dimUse(kind,id);
+  if(!u || !u.active){
+    return 'Nothing active refers to this '+what+', so everything about it can be changed, '+
+           'including switching it off.';
+  }
+  const parts=u.where.filter(w=>w.active>0).map(w=>w.active+' '+w.what+(w.active===1?'':'s'));
+  return parts.join(' and ')+' point'+(u.active===1?'s':'')+' at this '+what+
+         '. The fields those rows are matched on are locked, and it cannot be switched off '+
+         'until they are.';
+}
+/* In use means the identity fields are read only. The server refuses the write
+   either way; this stops somebody typing into a box that cannot be saved. */
+function useLocked(kind, id){
+  const u=dimUse(kind,id);
+  return !!(id && u && u.active);
+}
+
 function renderDims(){
   if(!isAdmin()){ pane('dims').innerHTML='<div class="card"><div class="empty">Admins only.</div></div>'; return; }
+  dimUseLoad();
+  const mayEdit=canEditDims();
   const hl=APP.ref.highLevelIds, cp=APP.ref.components, ln=APP.ref.lines, ar=APP.ref.areas;
+  const addBtn=(fn,label)=>mayEdit?'<button class="btn sm" onclick="'+fn+'">'+label+'</button>':'';
+  const editBtn=(fn)=>mayEdit?'<button class="btn link" onclick="'+fn+'">Edit</button>'
+                             :'<span class="muted small">read only</span>';
   pane('dims').innerHTML=
+  (mayEdit?'':'<div class="warn-box">Your access does not include changing the dimension '+
+    'tables (Can_Edit_Dims is N on the Permissions tab), so these are read only.</div>')+
   '<div class="grid2">'+
   '<div class="card"><h2>High Level IDs<span class="act">'+
-    '<button class="btn sm" onclick="editHL(null)">Add</button></span></h2>'+
+    addBtn('editHL(null)','Add')+'</span></h2>'+
     '<div class="scrollbox tablewrap"><table><thead><tr><th>ID</th><th>Brand</th><th>Geo</th><th>Treat</th>'+
-    '<th>Detail</th><th>Ccy</th><th>Act</th><th></th></tr></thead><tbody>'+
+    '<th>Detail</th><th>Ccy</th><th>Act</th><th class="right" title="Modelling lines and cold chain '+
+    'mix rows pointing at this High Level ID">Used by</th><th></th></tr></thead><tbody>'+
     hl.map(h=>'<tr><td class="num">'+h.High_Level_ID+'</td><td>'+esc(h.Brand)+'</td><td>'+esc(h.Geo)+'</td>'+
       '<td>'+esc(h.Treatment_Type)+'</td><td>'+esc(h.WL_Detail)+'</td><td>'+esc(h.Currency)+'</td>'+
-      '<td>'+esc(h.Active)+'</td><td class="rowacts"><button class="btn link" onclick="editHL('+h.High_Level_ID+')">Edit</button></td>'+
+      '<td>'+esc(h.Active)+'</td>'+useCell('hl',h.High_Level_ID)+
+      '<td class="rowacts">'+editBtn('editHL('+h.High_Level_ID+')')+'</td>'+
       '</tr>').join('')+'</tbody></table></div></div>'+
   '<div class="card"><h2>Components<span class="act">'+
-    '<button class="btn sm" onclick="editComp(null)">Add</button></span></h2>'+
+    addBtn('editComp(null)','Add')+'</span></h2>'+
     '<div class="scrollbox tablewrap"><table><thead><tr><th>ID</th><th>High Level Component</th><th>Component</th>'+
-    '<th>Act</th><th></th></tr></thead><tbody>'+
+    '<th>Act</th><th class="right" title="Modelling lines using this component">Used by</th>'+
+    '<th></th></tr></thead><tbody>'+
     cp.map(c=>'<tr><td class="num">'+c.Component_ID+'</td><td>'+esc(c.High_Level_Component)+'</td>'+
-      '<td>'+esc(c.Component)+'</td><td>'+esc(c.Active)+'</td>'+
-      '<td class="rowacts"><button class="btn link" onclick="editComp('+c.Component_ID+')">Edit</button></td>'+
+      '<td>'+esc(c.Component)+'</td><td>'+esc(c.Active)+'</td>'+useCell('comp',c.Component_ID)+
+      '<td class="rowacts">'+editBtn('editComp('+c.Component_ID+')')+'</td>'+
       '</tr>').join('')+'</tbody></table></div></div>'+
   '<div class="card"><h2>Modelling Lines<span class="act">'+
-    '<button class="btn sm" onclick="editLine(null)">Add</button></span></h2>'+
+    addBtn('editLine(null)','Add')+'</span></h2>'+
     '<div class="scrollbox tablewrap"><table><thead><tr><th>ID</th><th>High Level</th><th>Component</th>'+
-    '<th>Act</th><th></th></tr></thead><tbody>'+
+    '<th>Act</th><th class="right" title="Rate card and component mix rows on this line">Used by</th>'+
+    '<th></th></tr></thead><tbody>'+
     ln.map(l=>{const c=compById(l.Component_ID);
       return '<tr><td class="num">'+l.Modelling_ID+'</td><td>'+esc(hlLabel(hlById(l.High_Level_ID)))+'</td>'+
-      '<td>'+esc(c?c.Component:'?')+'</td><td>'+esc(l.Active)+'</td>'+
-      '<td class="rowacts"><button class="btn link" onclick="editLine('+l.Modelling_ID+')">Edit</button></td></tr>';
+      '<td>'+esc(c?c.Component:'?')+'</td><td>'+esc(l.Active)+'</td>'+useCell('line',l.Modelling_ID)+
+      '<td class="rowacts">'+editBtn('editLine('+l.Modelling_ID+')')+'</td></tr>';
     }).join('')+'</tbody></table></div></div>'+
   '<div class="card"><h2>Modelling Areas<span class="act">'+
     '<button class="btn sm" onclick="editArea(null)">Add</button></span></h2>'+
@@ -1588,52 +1648,112 @@ function renderDims(){
   '</div>';
 }
 function reloadRefAfterDim(){
+  /* The usage counts are stale the moment a dimension is saved — a new line
+     changes what its High Level ID is used by — so they are dropped and fetched
+     again rather than left showing the numbers from before the save. */
+  DIMUSE=null;
   run('initApp',[],d=>{ APP.ref=d.ref; APP.config=d.config; renderActive(); });
 }
-function activeSelect(id, val){
-  return '<div class="field w1"><label for="'+id+'">Active</label><select id="'+id+'">'+
-    '<option>Y</option><option'+(val==='N'?' selected':'')+'>N</option></select></div>';
+/* Active, with N taken away while something still points at the row. The server
+   refuses it either way (guardDeactivate_); this is so the option is not offered
+   and then rejected. */
+function activeSelect(id, val, locked){
+  return '<div class="field w1"><label for="'+id+'">Active</label>'+
+    '<select id="'+id+'"'+(locked?' disabled':'')+'>'+
+    '<option>Y</option>'+(locked?'':'<option'+(val==='N'?' selected':'')+'>N</option>')+
+    '</select>'+(locked?'<div class="hint">In use — switch its rows off first.</div>':'')+'</div>';
 }
+/* A field somebody may look at but not change, with the reason under it. A
+   disabled input still answers v(id), so the unchanged value is what gets sent
+   and the server sees no change to refuse. */
+function mfieldRO(id,label,val,span,why){
+  return '<div class="field'+(span?' w'+span:'')+'"><label for="'+id+'">'+label+'</label>'+
+    '<input id="'+id+'" type="text" disabled value="'+esc(val==null?'':val)+'">'+
+    '<div class="hint">'+why+'</div></div>';
+}
+function mselectRO(id,label,optsHtml,span,locked,why){
+  return '<div class="field'+(span?' w'+span:'')+'"><label for="'+id+'">'+label+'</label>'+
+    '<select id="'+id+'"'+(locked?' disabled':'')+'>'+optsHtml+'</select>'+
+    (locked&&why?'<div class="hint">'+why+'</div>':'')+'</div>';
+}
+/* The intro every dimension form opens with, as a modal-width note. */
+function useNote(kind,id,what){
+  return '<div class="w4 hint" style="margin-bottom:2px">'+esc(useIntro(kind,id,what))+'</div>';
+}
+function areaOptions(sel){
+  return APP.ref.areas.map(a=>'<option value="'+a.Area_ID+'"'+
+    (String(sel)===String(a.Area_ID)?' selected':'')+'>'+
+    esc(a.Area_ID+' — '+a.Area_Name)+'</option>').join('');
+}
+
 function editHL(id){
   const h=id?APP.ref.highLevelIds.find(x=>String(x.High_Level_ID)===String(id)):{};
+  const locked=useLocked('hl',id);
   modal(id?'Edit High Level ID '+id:'Add High Level ID',
     '<div class="fgrid">'+
+    useNote('hl',id,'High Level ID')+
+    /* Brand, Geo, Treatment Type and WL Detail stay editable however many rows
+       point here: nothing matches on them, every reference is by ID, and Output
+       re-derives the labels on each recalculation. */
     mfield('h_brand','Brand',h.Brand,2)+mfield('h_geo','Geo (GB/US/DE/CA)',h.Geo,2)+
     mfield('h_treat','Treatment Type',h.Treatment_Type,2)+mfield('h_detail','WL Detail',h.WL_Detail,2)+
-    mfield('h_ccy','Currency',h.Currency||'GBP',1)+activeSelect('h_active',h.Active)+
-    mfield('h_comment','Comment',h.Comment,2)+
+    mselectRO('h_area','Modelling area',areaOptions(h.Area_ID||1),2,locked,
+      'In use — the area decides which customer types its rates are valid for.')+
+    mfield('h_ccy','Currency',h.Currency||'GBP',1)+activeSelect('h_active',h.Active,locked)+
+    mfield('h_comment','Comment',h.Comment,4)+
+    '<div class="w4 hint">Brand, Geo, Treatment Type and WL Detail are labels — nothing is '+
+      'matched on them, so a typo can always be corrected here.</div>'+
     '</div>',
     modalActs('submitHL('+(id||'null')+')'));
 }
 function submitHL(id){
-  run('saveHighLevelId',[{id:id,areaId:1,brand:v('h_brand'),geo:v('h_geo'),treatmentType:v('h_treat'),
-    wlDetail:v('h_detail'),currency:v('h_ccy'),active:v('h_active'),comment:v('h_comment')}],
+  run('saveHighLevelId',[{id:id,areaId:v('h_area'),brand:v('h_brand'),geo:v('h_geo'),
+    treatmentType:v('h_treat'),wlDetail:v('h_detail'),currency:v('h_ccy'),
+    active:v('h_active'),comment:v('h_comment')}],
     ()=>{ closeModal(); showOk('Saved'); reloadRefAfterDim(); }, err=>showError(err.message), true);
 }
 function editComp(id){
   const c=id?APP.ref.components.find(x=>String(x.Component_ID)===String(id)):{};
+  const locked=useLocked('comp',id);
   modal(id?'Edit component '+id:'Add component',
     '<div class="fgrid">'+
-    mfield('c_hlc','High Level Component',c.High_Level_Component,2)+mfield('c_name','Component',c.Component,2)+
-    mfield('c_comment','Comment',c.Comment,3)+activeSelect('c_active',c.Active)+
+    useNote('comp',id,'component')+
+    (locked
+      ? mfieldRO('c_hlc','High Level Component',c.High_Level_Component,2,
+          'In use — this is the mix group key. Moving it would break the 100% split on both '+
+          'the group it leaves and the one it joins.')
+      : mfield('c_hlc','High Level Component',c.High_Level_Component,2))+
+    mfield('c_name','Component',c.Component,2)+
+    mselectRO('c_area','Modelling area',areaOptions(c.Area_ID||1),2,locked,
+      'In use — see above.')+
+    activeSelect('c_active',c.Active,locked)+
+    mfield('c_comment','Comment',c.Comment,4)+
+    '<div class="w4 hint">The Component name is a label and is always editable. The High Level '+
+      'Component is not: it is what groups lines into one 100% split.</div>'+
     '</div>',
     modalActs('submitComp('+(id||'null')+')'));
 }
 function submitComp(id){
-  run('saveComponent',[{id:id,areaId:1,highLevelComponent:v('c_hlc'),component:v('c_name'),
+  run('saveComponent',[{id:id,areaId:v('c_area'),highLevelComponent:v('c_hlc'),component:v('c_name'),
     active:v('c_active'),comment:v('c_comment')}],
     ()=>{ closeModal(); showOk('Saved'); reloadRefAfterDim(); }, err=>showError(err.message), true);
 }
 function editLine(id){
   const l=id?APP.ref.lines.find(x=>String(x.Modelling_ID)===String(id)):{};
+  const locked=useLocked('line',id);
   const hlOpts=APP.ref.highLevelIds.map(h=>'<option value="'+h.High_Level_ID+'"'+
     (l.High_Level_ID==h.High_Level_ID?' selected':'')+'>'+esc(h.High_Level_ID+' — '+hlLabel(h))+'</option>').join('');
   const cpOpts=APP.ref.components.map(c=>'<option value="'+c.Component_ID+'"'+
     (l.Component_ID==c.Component_ID?' selected':'')+'>'+esc(c.High_Level_Component+' / '+c.Component)+'</option>').join('');
   modal(id?'Edit line '+id:'Add modelling line',
     '<div class="fgrid">'+
-    mselectRaw('l_hl','High Level ID',hlOpts,2)+mselectRaw('l_cp','Component',cpOpts,2)+
-    mfield('l_comment','Comment',l.Comment,3)+activeSelect('l_active',l.Active)+
+    useNote('line',id,'line')+
+    mselectRO('l_hl','High Level ID',hlOpts,2,locked,
+      'In use — its rates and mixes would silently start describing another segment.')+
+    mselectRO('l_cp','Component',cpOpts,2,locked,
+      'In use — its rates and mixes would silently start describing another component.')+
+    activeSelect('l_active',l.Active,locked)+
+    mfield('l_comment','Comment',l.Comment,3)+
     '</div>',
     modalActs('submitLine('+(id||'null')+')'));
 }
@@ -1643,10 +1763,19 @@ function submitLine(id){
 }
 function editArea(id){
   const a=id?APP.ref.areas.find(x=>String(x.Area_ID)===String(id)):{};
+  const locked=useLocked('area',id);
   modal(id?'Edit area '+id:'Add area',
     '<div class="fgrid">'+
+    useNote('area',id,'area')+
     mfield('a_name','Area name',a.Area_Name,2)+mfield('a_metric','Output metric name',a.Output_Metric_Name,2)+
-    mfield('a_types','Customer types (CSV)',a.Customer_Types||'New,Repeat,OTC',3)+activeSelect('a_active',a.Active)+
+    /* Not locked outright: ADDING a type is always safe, and only removing one
+       that active rate rows are filed under is refused — a distinction a
+       disabled box could not make. */
+    mfield('a_types','Customer types (CSV)',a.Customer_Types||'New,Repeat,OTC',3)+
+    activeSelect('a_active',a.Active,locked)+
+    '<div class="w4 hint">Adding a customer type is always safe. Removing one is refused while '+
+      'an active rate card row in this area is filed under it — those rows would be costed into '+
+      'a column the area no longer has.</div>'+
     '</div>',
     modalActs('submitArea('+(id||'null')+')'));
 }
