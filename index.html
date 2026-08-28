@@ -1552,25 +1552,22 @@ function renderOutput(){
   if(notReady('output')) return;
   const all=outputAllRows();
   const rows=tRows('output', OUTPUT_COLS, all);
+  /* One control above the table, on purpose. What used to be here has each gone
+     somewhere it reads better rather than being dropped:
+
+       Recalculate, Snapshot   the header, reachable from every tab
+       Compare vs (baseline)   the Snapshots screen, with the snapshots it picks between
+       Copy                    folded into Export CSV as shift-click — see below
+       Last recalc             the header status chip, which already carries it in its tooltip
+
+     The row count and "Clear filters & sort" that tToolbar drew go with them. The
+     table's own footer still offers "Show all" past the render cap, and each of
+     the six filters clears from its own dropdown. */
   pane('output').innerHTML=
     '<div class="card"><div class="body"><div class="row tight">'+
-    tToolbar('output', OUTPUT_COLS, Math.min(rows.length, tState('output').showAll?rows.length:OUTPUT_RENDER_CAP), all.length)+
     '<div class="spacer"></div>'+
-    /* Recalculate and Snapshot are portal-wide — they move every area at once — so
-       they are Admin's, and the server re-checks. Export and Copy are reads, and
-       belong to anyone who can see the table. The variance baseline used to sit
-       here too; it lives on the Snapshots screen now, with the snapshots it picks
-       between. */
-    '<button class="btn" onclick="exportOutputCsv()">Export CSV</button>'+
-    '<button class="btn" onclick="copyOutputCsv()">Copy</button>'+
-    (isAdmin()?'<button class="btn" onclick="doSnapshot()">Snapshot</button>':'')+
-    (isAdmin()?'<button class="btn primary" id="recalcBtn" onclick="doRecalc()">Recalculate</button>':'')+
-    '</div>'+
-    '<div class="hint">Last recalc: '+esc(APP.config.lastRecalc||'never')+' — the Output tab of the '+
-      'Google Sheet mirrors this table for downstream extracts (local currency + GBP).'+
-      (isAdmin()?'':' Recalculating and snapshotting are Admin-only, because they move every '+
-        'modelling area at once.')+'</div>'+
-    '</div></div>'+
+    '<button class="btn" onclick="exportOutputCsv(event)">Export CSV</button>'+
+    '</div></div></div>'+
     '<div class="card"><div class="tablewrap"><table>'+
     tHead('output', OUTPUT_COLS, all)+
     tBody('output', OUTPUT_COLS, rows, OUTPUT_RENDER_CAP,
@@ -1622,23 +1619,26 @@ function outputCsvName(n){
   bits.push(n+'rows');
   return bits.join('-').replace(/[^a-z0-9-]/gi,'')+'.csv';
 }
-function exportOutputCsv(){
+function exportOutputCsv(ev){
   const rows=outputVisibleRows();
   if(!rows.length) return showError('Nothing to export — no rows match these filters.');
-  downloadCsv(outputCsvName(rows.length), outputCsv(rows));
-}
-function copyOutputCsv(){
-  const rows=outputVisibleRows();
-  if(!rows.length) return showError('Nothing to copy — no rows match these filters.');
-  copyCsv(outputCsv(rows), rows.length);
+  const text=outputCsv(rows);
+  /* Shift-click puts the CSV on screen instead of downloading it. There used to be
+     a Copy button beside this one for that job; the toolbar is one control now, and
+     a download this page starts can be swallowed by the iframe without saying so
+     (see downloadCsv), so the way out had to survive as something. A modifier costs
+     no room, and the toast after every export names it — which is the only place
+     anybody would need to learn it, because it is the only place it comes up. */
+  if(ev && ev.shiftKey) return showCsvFallback(text);
+  downloadCsv(outputCsvName(rows.length), text);
 }
 /* Hand the browser a file.
 
    The portal runs inside an Apps Script iframe, and whether that sandbox permits
    a download the page starts itself is not something this code can find out — a
-   blocked click fails silently rather than throwing. Hence the Copy button beside
-   it: if nothing lands in your downloads, the same CSV is one click from the
-   clipboard. */
+   blocked click fails silently rather than throwing. Hence the shift-click escape
+   hatch on Export CSV: if nothing lands in your downloads, the same CSV goes on
+   screen to be copied by hand. The toast below is what tells you it exists. */
 function downloadCsv(name, text){
   try{
     /* A BOM, so Excel opens a UTF-8 CSV without mangling accented names. */
@@ -1650,20 +1650,10 @@ function downloadCsv(name, text){
     a.click();
     setTimeout(()=>{ URL.revokeObjectURL(url); if(a.parentNode) a.parentNode.removeChild(a); },0);
     showOk('Exported '+name+'. If nothing appeared in your downloads, the iframe blocked it — '+
-           'use Copy instead.');
+           'shift-click Export CSV to put the text on screen instead.');
   }catch(e){
     showCsvFallback(text);
   }
-}
-function copyCsv(text, n){
-  const ok=()=>showOk(n+' row(s) copied as CSV. Paste into a spreadsheet.');
-  try{
-    if(navigator.clipboard && navigator.clipboard.writeText){
-      navigator.clipboard.writeText(text).then(ok, ()=>showCsvFallback(text));
-      return;
-    }
-  }catch(e){}
-  showCsvFallback(text);
 }
 /* Last resort: put it on screen, so it can always be got out by hand. */
 function showCsvFallback(text){
@@ -2316,8 +2306,8 @@ function renderSnapshots(){
         'Cost_Local row in the snapshot. Two snapshots covering different months are not '+
         'comparable on that figure alone — use Compare, which matches row for row.</div>'
     : '<div class="empty">No snapshots yet.'+(isAdmin()
-        ? ' Take one from the Output tab to start the record.'
-        : ' An Admin can take one from the Output tab.')+'</div>';
+        ? ' Take one above, or from the header, to start the record.'
+        : ' An Admin can take one.')+'</div>';
 
   pane('snapshots').innerHTML=
     '<div class="card"><div class="body"><div class="row tight">'+
