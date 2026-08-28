@@ -41,6 +41,10 @@ functions, run from the Apps Script IDE (`clasp run` is not configured — no `p
   for `engine.js`; the engine is documented as matching 1,560/1,560 cells within 1e-4.
   **Run it after any engine change.**
 
+Run `verifySetup()` first after any deploy that changed `HEADERS` — the capability columns on
+`Permissions` were appended that way, and they read as blank (which resolves to today's
+behaviour) until it has filled the headers in.
+
 ## Architecture
 
 ### Sheet-as-database, positional writes
@@ -86,6 +90,42 @@ cosmetic only. An unknown email gets rank 0, `initApp` returns `{authorised:fals
 client shows the "not in Permissions" panel. The web app runs as `USER_DEPLOYING` with `DOMAIN`
 access.
 
+**Capability columns.** On top of the rank sit four columns on the `Permissions` tab, declared
+in `CAPS`: `Can_Edit_Rates`, `Can_Edit_Mixes`, `Can_Edit_Dims`, `Can_View_Audit`. Two rules make
+them safe, and both are load-bearing — do not relax either when adding a fifth:
+
+- **A capability only ever takes rights AWAY.** Every gate still runs the rank and area check it
+  ran before; the column is an extra condition on top. `requireEditDimsForArea_` therefore keeps
+  the **Admin** rank floor `dimensions.js` has always had rather than lowering it to Editor —
+  a capability column must never be the route by which somebody gains access they did not have.
+- **A blank cell means "whatever the rank already said".** `verifySetup()` fills a new header in
+  and leaves the cells under it empty, so the deploy that adds a column changes nobody's access
+  and nothing has to be backfilled first. `capOf_(cell, rank, spec)` reads one cell; `false` is a
+  value, not an absence (an unticked Sheets checkbox), and only `N`/`NO`/`FALSE`/`0` are false.
+
+`spec.dflt(rank)` is what a blank resolves to. The three edit columns default to **true**, since
+the rank gate in front of them is what admits an Editor at all. `Can_View_Audit` defaults to
+**Admin only** — defaulting it on would hand every Viewer the change history on the deploy that
+adds the column.
+
+| Gate | Rank floor | Column |
+|---|---|---|
+| `requireEditRatesForArea_(areaId)` | Editor + area | `Can_Edit_Rates` |
+| `requireEditMixesForArea_(areaId)` | Editor + area | `Can_Edit_Mixes` |
+| `requireEditDimsForArea_(areaId)` | **Admin** | `Can_Edit_Dims` |
+| `requireViewAudit_()` | Viewer | `Can_View_Audit` |
+| `requireCapability_(perms, cap)` | whatever the caller already required | any |
+
+`bulk.js` uses `requireCapability_(requireEditor(), 'editRates')` rather than the per-area gate,
+because which areas a bulk row belongs to is decided per row inside the lock, and the capability
+is a property of the person. `history.js`'s `requireRecordHistory_(areaId)` passes on
+`Can_View_Audit` **or** edit access to that record's own area — see below for why.
+
+`initApp` returns `perms.caps` on the user object; the client's `can(cap)` / `canEditRates()` /
+`canEditMixes()` / `canEditDims()` / `canViewAudit()` hide what the server would refuse. A
+payload with no `caps` (an older cached page) falls back to the rank, which is what a blank cell
+resolves to server side, so the two agree.
+
 ### Standard write path
 
 Every mutating function follows the same shape — keep it when adding one:
@@ -116,8 +156,95 @@ shows:
 
 A bulk rate change writes roughly five audit rows per rate, each carrying its
 `BULK-<timestamp>` reference as the first token of `Summary`, with the batch summary row
-written last so it is newest. That is the hook for grouping them in the UI. History currently
-shows the last 300 rows, so a large batch fills it.
+written last so it is newest. `renderHistory()` groups on exactly that reference
+(`bulkRefOf` / `historyGroups`) and shows one collapsible line per batch. History shows the last
+`AUDIT_PAGE_ROWS` (300) rows, so a large batch would otherwise fill the whole window with one
+action.
+
+### Reading a record's history back (`history.js`)
+
+The `*_Amends` tabs hold the whole post-change row for every save and were write-only until
+`recordHistory({table, recordId, asOf})`. It reconstructs one row's state on a chosen date plus
+the amendments that got it there, for the three tables in `HISTORY_TABLES` (`Rate_Card`,
+`Component_Mix`, `Cold_Chain_Mix`).
+
+- **Last-write-wins replay, not a diff replay.** Each amend row is a complete copy of the record
+  after that save, so the state on a date is the latest amend at or before it. That stays correct
+  where the chain has a gap — an import, a hand edit, a row predating the mechanism — which a
+  diff replay would carry forward as a silent error.
+- The cutoff is the **end** of the chosen day: a save at 16:20 on the 14th is part of what the
+  record said on the 14th. `tableToObjects_` normalises `Amend_Timestamp` down to a date, so two
+  saves on one day are ordered by `Amend_ID`.
+- A record with no amends says so explicitly. An empty panel would read as "nothing ever changed".
+- `requireRecordHistory_` passes on `Can_View_Audit` **or** edit access to the record's area. The
+  History *screen* is a list of what everybody has been doing and defaults to Admin; this is one
+  row shown next to that row, and seeing what a rate you may edit used to say is part of editing
+  it.
+
+### Dimension usage and the in-use guards (`lookups.js`)
+
+Nothing in a Sheet enforces a foreign key. `getDimensionUsage()` returns, per dimension row, how
+many rows in each child table point at it (`DIM_USES` declares the child tables; counts are
+bucketed in one pass per table, not asked once per row). `dimensions.js` runs three guards inside
+the lock, against the row as it stands, on **updates only** — a row nothing points at yet cannot
+orphan anything:
+
+- `guardDeactivate_` — refuses switching off a parent with live children. That is exactly the
+  state `ORPHAN_FK` calls an error, so allowing it would let one click block the next recalculation.
+- `guardRelink_` — refuses changing a value other rows are **matched on**: a Component's
+  `High_Level_Component` (the mix group key — moving it breaks the 100% split on both the group it
+  leaves and the one it joins), a Modelling Line's `High_Level_ID` and `Component_ID`, and a High
+  Level ID's `Area_ID`.
+- `guardCustomerTypes_` — refuses removing a customer type an active `Rate_Card` row in that area
+  is filed under. Adding one is always allowed: it shows up as `RATE_MISSING` wherever nothing
+  prices it, which is the correct thing to be told.
+
+**Everything else stays editable, and the screen says so.** A High Level ID's Brand, Geo,
+Treatment Type and WL Detail are labels — every reference is by id and `Output` re-derives them
+each recalculation — so a typo in a brand name is always correctable. Saying which fields are safe
+is as much the point as blocking the ones that are not.
+
+### Copying a segment (`clone.js`)
+
+`copySegment(p)` stands a new High Level ID up from an existing one, creating modelling lines,
+rate rows, component mix rows and cold chain rows. It **changes nothing that already exists**.
+Four properties, taken from `bulk.js` — do not erode them:
+
+1. **Preview first.** It previews unless given `preview:false` **and** the `planKey` the preview
+   issued. The key fingerprints both sides — source rows, target rows and the selection — so a
+   rate added to the target in between refuses the write.
+2. **It only fills gaps.** Nothing is overwritten, and nothing is copied *alongside* what is
+   there either: two overlapping rate periods is a `RANGE_OVERLAP` error, and a tool for saving
+   typing must not leave one behind. Every skip is counted and shown.
+3. **Lines pair by `Component_ID`**, never by position. A component with no partner becomes a new
+   line if lines were selected, and is listed as unpaired if not.
+4. **Every row created says where it came from**, in its `Comment`, so a rate nobody actually
+   negotiated stays findable.
+
+**Component mix skips per GROUP, not per line.** A mix is a share of a 100% split across every
+line of one `High_Level_Component`, so copying a 30% share into a group whose other line already
+holds 100% hands back a segment failing `MIX_SUM` — broken by the tool, in the state it just
+wrote. A populated group is left entirely alone; the new line in it reports `NO_COMP_MIX`, which
+is the warning that says rebalance the split, the one decision a copy cannot make.
+
+Gated per part against the **target's** area: lines need `Can_Edit_Dims` (and its Admin floor),
+rates need `Can_Edit_Rates`, either mix needs `Can_Edit_Mixes`.
+
+### Snapshots (`snapshots.js`)
+
+`createSnapshot` / `setCompareSnapshot` are Admin (they move every area at once).
+`listSnapshots()` and `compareSnapshots(from, to)` are **Viewer** — they read what a Viewer can
+already see.
+
+`Forecast_Snapshots` is one row per High Level ID × month × customer type, so a snapshot is a
+*name* repeated across hundreds of rows; `listSnapshots()` collapses it back to the thing a person
+picks from a list. `compareSnapshots` keys both sides `High_Level_ID | yyyy-mm | Customer_Type`,
+the grain `Output` is written at, and an empty `to` means the live `Output` tab — the comparison
+people want most often.
+
+A key present on one side only is reported as **added or removed, never as a change from zero**.
+A segment that did not exist in January has not gone up by infinity, and folding those into the
+percentages would make every other number unreadable.
 
 ### The engine (`engine.js`)
 
@@ -152,13 +279,27 @@ be lifted on purpose.
 
 | Rule | Sev | What it catches |
 |---|---|---|
+| `ORPHAN_FK` | ERROR | an active row whose dimension is missing or switched off. `computeAll_` filters lines to **active** parents, so deactivating a High Level ID silently drops everything under it while those rows still read as live |
+| `DUP_MODELLING` | ERROR | two active lines for one High Level ID × component. The engine costs each line and adds them, so the component is counted twice — and `MIX_SUM` cannot see it, because 0.7 and 0.3 across two duplicate lines still totals 100% |
+| `RATE_NEG` | ERROR | a `CPU` or `QTY` that is negative, blank, or not a number. `saveRate` checks `isNaN` and stops there; a negative cost nets off inside its High Level ID in `Output` and an unreadable one is costed as zero by `safeNum`, so neither surfaces as a missing rate |
+| `RANGE_OVERLAP` | ERROR | two active rate rows sharing an expanded CC/customer-type slot, or two cold chain rows, covering the same day. Reuses `expandCC_`/`expandCT_`, because exact-key matching would miss that a `Both`/`All` row and a `CC`/`New` one are the same slot |
+| `NO_RATE` | ERROR | an active line with no active rate row at all — costed at zero, and in `Output` indistinguishable from a component switched off on purpose |
 | `RATE_MISSING` | ERROR | a segment whose component mix is above zero with no `Rate_Card` row covering a given **customer type** — costs nothing, and in `Output` is indistinguishable from a component switched off on purpose |
 | `MIX_SUM` | ERROR | the 100%-per-group invariant, re-derived over the whole `Component_Mix` table, clipped to the horizon |
 | `MIX_OVERLAP` | ERROR | two active mix rows of one line covering the same day. The engine ADDS overlapping rows (`cm += Mix`), so an overlap is not a replacement — and MIX_SUM cannot see the worst case, an old row at 1.0 left open under a new one at 0, which sums to a valid 100% while the component the person tried to switch off stays on |
-| `RANGE_GAP` | WARN | a month with no active rate or mix row **inside a line's own covered period**, or a line with nothing anywhere in the horizon |
+| `NO_COMP_MIX` | WARN | an active line with no active component mix row. Also costs zero, but "no mix" is a legitimate way to say the component is not shipping yet |
+| `RANGE_GAP` | WARN | a month with no active rate or mix row **inside a line's own covered period**, or a line whose rows all fall outside the horizon |
 | `OUTPUT_SWING` | WARN | cost moving more than `VALIDATION_SWING_PCT` month on month, per High Level ID × customer type, ignoring transition months |
+| `NO_CC_MIX` | INFO | a High Level ID with live lines and no active cold chain row. Read as 0% cold chain, which is right for anything ambient; one finding per High Level ID, not per line |
 | `SWING_SKIPPED` | INFO | how many swing comparisons were skipped as transition months |
 | `TRUNCATED` | INFO | a rule hit `VALIDATION_MAX_PER_RULE` and the rest are not listed |
+
+`NO_RATE` / `NO_COMP_MIX` / `NO_CC_MIX` **are** the Dashboard's old completeness check, folded in
+so there is one severity-ranked report rather than two mechanisms answering overlapping questions
+in different words. `computeCompleteness_` is gone; `loadAllAppData` sends only `activeLines`, and
+`renderDashboard()` reads those three rule codes out of `APP.validation`. Unlike `RANGE_GAP` they
+are deliberately **not** horizon-clipped: "this line has never had a rate" is worth saying whatever
+the horizon is set to, and it is the check somebody wants the moment they add a line.
 
 **Every one of these boundaries was drawn to keep the rule reporting things a
 person can act on. Do not widen one without re-reading why it is where it is:**
@@ -184,6 +325,28 @@ person can act on. Do not widen one without re-reading why it is where it is:**
   A mid-month change that is genuinely wrong still surfaces one month later, in
   the first full-month comparison. `scratchpad/swingprobe.js` demonstrates all of
   this against the real engine.
+- `ORPHAN_FK` reports at the **boundary** of a switched-off region, not all the
+  way down it. Soft deletes have never cascaded here, so retiring one High Level
+  ID leaves its lines, their rates, their mixes and its cold chain rows behind.
+  Counting every one of those would raise a dozen errors for one deliberate act
+  and block the next recalculation until somebody had ticked through all of them
+  — which is how a rule pack teaches people to set `VALIDATION_BLOCKS_RECALC` to
+  `FALSE`. A row is reported when its own parent is off and that parent's
+  ancestors are fine (it is a straggler), and passed over when the break is
+  further up. A **missing** parent is always reported: a dangling id is never
+  somebody's deliberate act.
+- `RANGE_GAP` leaves the no-rows-at-all case to `NO_RATE` / `NO_COMP_MIX`, which
+  say the same thing with the severity the gap deserves. What it keeps is the
+  case those cannot see: rows that exist but all fall outside the horizon.
+- `RANGE_OVERLAP` and `MIX_SUM` clip to the horizon; `MIX_OVERLAP` does too. An
+  overlap between two rows that both expired in 2024 cannot make a 2026 number
+  wrong, and left in it errors on every run forever.
+
+`validationInput_` exposes `input.raw` — the tables **unfiltered**. Everything else in that
+object is the population the engine costs (active lines under active parents, rows whose dates
+parse), which is the right lens for "is the forecast wrong" and the wrong one for "is the data
+intact": a line pointing at a High Level ID that does not exist is precisely the row the filter
+throws away. `ORPHAN_FK`, `DUP_MODELLING`, `RATE_NEG` and `RANGE_OVERLAP` read `input.raw`.
 
 Two things to keep in mind when adding a rule:
 
@@ -211,7 +374,10 @@ truncation reads as all-clear.
   High Level ID; gaps are allowed and treated as 0% CC.
 - `dimensions.js` — Admin-only upserts (`id` present = update, absent = create), duplicate active
   `High_Level_ID × Component_ID` lines rejected, every change snapshotted as JSON to
-  `Dimension_Amends`.
+  `Dimension_Amends`. `_upsertDim_` takes `opts = {areaId, guard}`; the guard runs inside the lock
+  on an update only. `saveLine` gates *before* it reads anything, because its duplicate check
+  reports what it finds in the sheet and somebody who may not edit dimensions should be told that
+  rather than told about line 1003.
 
 ### Bulk rate changes (`bulk.js`)
 
@@ -261,25 +427,48 @@ source files into one `vm` context so the code under test is the shipped code.
 uploads every root `.js` as a `.gs`, and `.clasp.json` sets `skipSubdirectories: false`, so a
 `test/` folder would go up too.
 
-Harnesses built so far: `gasenv.js` (the fake host), `bulktest.js` (bulk.js, 58 assertions),
-`validatetest.js` (the rule pack and the audit diff, 79 assertions), `clienttest.js` (the pure
-functions inside `index.html`'s `<script>` — CSV builder, picker markup — 32 assertions) and
-`swingprobe.js` (runs the real `computeAll_` over a mid-month launch and shows what
-`OUTPUT_SWING` does with the rows it produces).
-Rebuild rather than reinvent; four gotchas cost time:
+Harnesses built so far — rebuild rather than reinvent:
+
+| File | What it covers |
+|---|---|
+| `gasenv.js` | the fake host: `SpreadsheetApp`, `Session`, `Utilities`, `LockService`, plus `loadPortal(root, book, opts)` |
+| `fixture.js` | a small complete book — two areas, three High Level IDs, a split component group, five rate rows |
+| `assert.js` | `ok` / `eq` / `throws` / `done` |
+| `headers.js` | `HEADERS` out of a throwaway context (it is a `const`, see below) |
+| `clientenv.js` | `index.html`'s `<script>` block under stub `window`/`document`/`google` |
+| `authtest.js` | rank and capability resolution, every gate, a pre-column Permissions tab |
+| `validatetest.js` | the whole rule pack, the audit diff, and the recalculate gate |
+| `lookupstest.js` | usage counts and the three dimension guards |
+| `clonetest.js` | `copySegment` preview, plan key, group-level mix skipping, per-part permissions |
+| `historytest.js` | `recordHistory` reconstruction and who may read it |
+| `snaptest.js` | `listSnapshots` and `compareSnapshots` |
+| `clienttest.js` | client capability helpers, usage-count rendering, escaping |
+| `tabletest.js` | the sortable/filterable table module |
+| `histuitest.js` | batch grouping on the History screen |
+| `swingprobe.js` | runs the real `computeAll_` over a mid-month launch to show what `OUTPUT_SWING` does with it |
+
+Six gotchas cost time:
 
 - `Date` objects created inside the `vm` context fail `instanceof Date` in the host realm, and
   `normDate()` tests exactly that. Hand the host's `Date` into the sandbox so both sides share
   one constructor. (Or test with `Object.prototype.toString.call(d) === '[object Date]'`.)
 - A top-level `const` in a `vm` script lives in the context's global **lexical** scope, which is
-  not a property of the contextified object: `ctx.HEADERS` is `undefined` while
+  not a property of the contextified object: `ctx.HEADERS` and `ctx.APP` are `undefined` while
   `ctx.runValidationCore_` (a function *declaration*) is not. Reach consts with
-  `vm.runInContext('HEADERS', ctx)`.
-- Load order matters: `utils.js`, `auth.js`, `code.js`, `rates.js`, `mixes.js`, `engine.js`,
-  `validate.js`, `bulk.js`.
+  `vm.runInContext('HEADERS', ctx)` — `loadPortal` and `loadClient` both expose that as `ctx.$`.
+- Load order matters: `utils.js`, `auth.js`, `code.js`, `rates.js`, `mixes.js`, `dimensions.js`,
+  `engine.js`, `validate.js`, `bulk.js`, `snapshots.js`, `lookups.js`, `clone.js`, `history.js`.
 - `index.html` can be tested the same way: match out the `<script>` block and evaluate it with
   stub `window`/`document`/`google` objects. It only touches the DOM inside functions, so the
-  block evaluates fine without one.
+  block evaluates fine without one. Make `getElementById` return a **memoised stub per id**
+  rather than `null`, and a render function runs end to end and its output can be read back off
+  the stub — which is how the History batch markup is asserted.
+- `summariseFindings_` returns only the first 200 findings, so a test about
+  `VALIDATION_MAX_PER_RULE` has to read the `Validation_Results` tab out of the book, not the
+  report.
+- Fixture row indices are off by one for the header: `book['High_Level_IDs'][1]` is the first
+  data row. Two of the ORPHAN_FK tests initially passed against the wrong High Level ID because
+  of it.
 
 ### Config tab keys
 
@@ -304,11 +493,36 @@ name to one component. `.checks` (the collapsible dimension dropdown, with `ckPl
 `.modal{overflow:hidden}` and `.mbody{overflow:auto}`, which is why it is placed from script
 and re-placed on scroll and resize; `modal()` wires that up for any modal containing one.
 
-Structure: tabs are declared in the `TABS` array (`admin:true` hides a tab from non-Admins); each
-has a `render<Tab>()` function dispatched by `renderActive()`, and `notReady(id)` renders the
-loading/error skeleton until phase 2 finishes. `fitNav()` measures the tab row and collapses
-overflow into a **More** menu, pinning `NAV_ALWAYS`. HTML is built by string concatenation —
-**always pass user/sheet text through `esc()`**.
+Structure: tabs are declared in the `TABS` array (`admin:true` hides a tab from non-Admins,
+`cap:'viewAudit'` hides it unless that capability is granted); each has a `render<Tab>()` function
+dispatched by `renderActive()`, and `notReady(id)` renders the loading/error skeleton until
+phase 2 finishes. `fitNav()` measures the tab row and collapses overflow into a **More** menu,
+pinning `NAV_ALWAYS`. HTML is built by string concatenation — **always pass user/sheet text
+through `esc()`**.
+
+### The sortable, filterable table module
+
+Ported from the Postage Forecast Portal's OUTPUT table, and used by the Rate Card and Output
+screens. A column descriptor is
+`{key, label, type:'num'|'str', filter:'pick'|'range'|'text'|null, dp, right, cls, title, sort, cell, hint}`;
+state lives in `TBL[id]` and the render function to call back in `TBL_RENDER[id]`.
+
+- `tRows(id, cols, all)` filters then sorts, both over the array already in memory.
+  `type:'num'` is what stops 10 sorting before 2.
+- The three filter kinds are chosen **per column**, because the useful question differs: `pick`
+  for a short closed list, `range` for a number, `text` for anything open-ended.
+- `tPickValues` narrows a pick list by every *other* column's filter, so a combination that
+  matches nothing is never offered.
+- `tSort` cycles ascending → descending → **off**, so a column can be un-sorted without a reload.
+- The render cap is a concession, not a wall: `tBody` offers **Show all**, and sorting brings
+  either end of the range to the top. The CSV always exports the filtered *and sorted* set.
+- **`tRerender(id)` restores focus and caret** to the control carrying `data-tf`. The panes are
+  rebuilt with `innerHTML`, which destroys the live input, so a text filter would otherwise lose
+  focus on every keystroke. Any new screen with a text filter must go through it.
+
+The Rate Card flattens Brand, Geo, Treatment and Component onto each row (`rateRowsAll()`) —
+they live on the line's High Level ID and its component, and they are exactly what people filter
+by. Buried inside one "Line" label they could only be matched as free text and not sorted at all.
 
 - `modal(title, body, footer, wide)` builds the overlay and returns `{hide}`; `closeModal()`
   dismisses it. `mfield`/`mselect`/`mselectRaw`/`modalActs` build the 4-column field grid — span
@@ -323,3 +537,12 @@ overflow into a **More** menu, pinning `NAV_ALWAYS`. HTML is built by string con
   `.rowacts` precisely so the footer rule cannot reach them.
 - Component mix editing keeps its working set in the `MIXEDIT` global and previews the per-segment
   percentage sum client side, but the server re-validates.
+- Lazily-loaded side payloads each have their own global and their own invalidation: `DIMUSE`
+  (usage counts, dropped by `reloadRefAfterDim` and after a copy), `SNAPS` (the snapshot list,
+  dropped by `doSnapshot`), `BULKOPTS`, `RECHIST`, `SNAPDIFF`. A screen that writes has to drop
+  the ones its write invalidated, or it shows the numbers from before the save.
+- A dimension edit form opens with `useIntro(kind, id, what)` — a sentence naming what points at
+  the row — and locks the fields that are therefore fixed (`useLocked`, `mfieldRO`, `mselectRO`,
+  `activeSelect(id, val, locked)`). A disabled input still answers `v(id)`, so the unchanged value
+  is what gets sent and the server sees nothing to refuse. Nobody should learn the rule by being
+  refused.
