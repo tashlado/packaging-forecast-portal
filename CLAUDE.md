@@ -126,6 +126,39 @@ is a property of the person. `history.js`'s `requireRecordHistory_(areaId)` pass
 payload with no `caps` (an older cached page) falls back to the rank, which is what a blank cell
 resolves to server side, so the two agree.
 
+**Refusals are logged.** Every gate calls `logDenied_(perms, scope, targetId, reason)`
+(`utils.js`) before it throws: one `Audit_Log` row with `Action = DENIED`, `Target_Table`
+saying which kind of check refused (`PORTAL` for a rank floor, `AREA` for scope,
+`CAPABILITY` for a column), `Target_ID` naming the role, area or capability, and `Summary`
+saying what the account actually has. `Field`/`Old_Value`/`New_Value` stay empty — nothing
+changed. They show up on the History screen like any other row, which is gated on
+`Can_View_Audit`. Three properties, all load-bearing:
+
+- **It never throws.** A refusal is already the unhappy path; a logging failure must not
+  replace the readable "you cannot do this" with a spreadsheet error, and must not stop the
+  throw that follows. Everything is swallowed to `Logger.log`.
+- **It never gates.** It reads the `perms` the caller already resolved and calls no
+  `require*` of its own, so recording a refusal cannot recurse into a second one.
+- **It writes outside the lock**, because that is where the gates run — every entry point
+  checks rights before `withLock`. Taking the script lock to record a refusal would queue
+  refused calls behind real writes. The cost is that two simultaneous refusals can be
+  allotted the same `Log_ID` (`getNextId` is a per-execution max+1, not a reservation);
+  nothing keys on `Log_ID`, so that is a dent in the numbering rather than a lost row.
+
+Call sites: `requireRole_`, `requireEditorForArea_`, `requireCapability_` and
+`requireEditDimsForArea_` in `auth.js`, `requireRecordHistory_` in `history.js`, and
+`bulk.js`'s per-row scope re-check. Because the gates **nest** rather than sit side by side,
+a doubly-refused call still writes exactly one row — the innermost reason, which is the one
+to fix first ("not an Editor" rather than "no editRates" for somebody who is neither).
+
+Two things are deliberately **not** logged, and adding either would drown the ones that
+matter: `initApp` returning `{authorised:false}` for an unknown email, which is the shell
+saying "you are not set up" rather than an action refused and fires on every page load; and
+`bulk.js`'s `skippedNoScope`, which is a count the preview already shows. `roleText_` tells
+the two causes of rank 0 apart — no active row at all, versus a `Role` cell holding
+something `ROLE_RANK` does not recognise — because a typo reads as no access and is
+invisible on the tab itself.
+
 ### Standard write path
 
 Every mutating function follows the same shape — keep it when adding one:
@@ -266,6 +299,23 @@ rows are weighted by cold-chain share according to `CC_Flag` (`CC` → cc, `Ambi
 **All engine date maths uses UTC-day milliseconds (`utcDay_`, `DAY_MS`) on purpose** — local
 midnight arithmetic gives wrong day counts across the March/October DST transitions. Don't
 "simplify" it back to local `Date` maths.
+
+### FX_Rates is read-only to the app
+
+There is **no write path to `FX_Rates`** — no `saveFx`, no `getSheet(SHEET.FX)` anywhere.
+`verifySetup()` creates the tab with its headers, `engine.js` reads it into `fxMap` to fill
+`FX_to_GBP` and `Cost_GBP`, and `loadAllAppData` ships it to the client. Rates are
+maintained by hand in the spreadsheet. Four consequences to know before changing anything
+here:
+
+- There is no `FX_Rates_Amends` tab, so unlike `Rate_Card` and the two mix tables an FX
+  change leaves **no history at all** — not even a row-level snapshot.
+- No validation rule looks at FX.
+- A month with no FX row is **silent**: `engine.js` writes `fx || ''` and
+  `fx ? local * fx : ''`, so `Cost_Local` is populated while `FX_to_GBP` and `Cost_GBP`
+  come out blank. Downstream extracts reading `Cost_GBP` get a gap with nothing said.
+- The client fetches `fx` in the phase-2 payload and assigns it to `APP.fx`, and **nothing
+  reads it** — there is no FX screen.
 
 ### The validation rule pack (`validate.js`)
 
@@ -446,8 +496,12 @@ Harnesses built so far — rebuild rather than reinvent:
 | `tabletest.js` | the sortable/filterable table module |
 | `histuitest.js` | batch grouping on the History screen |
 | `swingprobe.js` | runs the real `computeAll_` over a mid-month launch to show what `OUTPUT_SWING` does with it |
+| `deniedtest.js` | the DENIED audit row every gate writes, and the paths that must write none |
+| `smoketest.js` | `initApp` / `loadAllAppData` for each role, asserting no spurious refusals |
+| `headertest.js` | the header actions: what each role is shown, the tab switch, prompt ordering, re-enabling |
+| `patch.js` | exact-string file edits that survive CRLF — the `.js` files are CRLF, `index.html` is LF |
 
-Six gotchas cost time:
+Seven gotchas cost time:
 
 - `Date` objects created inside the `vm` context fail `instanceof Date` in the host realm, and
   `normDate()` tests exactly that. Hand the host's `Date` into the sandbox so both sides share
@@ -469,6 +523,11 @@ Six gotchas cost time:
 - Fixture row indices are off by one for the header: `book['High_Level_IDs'][1]` is the first
   data row. Two of the ORPHAN_FK tests initially passed against the wrong High Level ID because
   of it.
+- **The `.js` files are CRLF and `index.html` is LF.** An exact-string edit written with `
+`
+  silently matches nothing in a `.gs` source file, and an edit that inserts LF into one leaves
+  it mixed. `patch.js` normalises to LF, applies, and writes back in whatever the file had;
+  it also fails loudly when an anchor matches zero or more than one time.
 
 ### Config tab keys
 
@@ -499,6 +558,29 @@ dispatched by `renderActive()`, and `notReady(id)` renders the loading/error ske
 phase 2 finishes. `fitNav()` measures the tab row and collapses overflow into a **More** menu,
 pinning `NAV_ALWAYS`. HTML is built by string concatenation — **always pass user/sheet text
 through `esc()`**.
+
+**Row actions are `.btn.sm`, and `.btn.sm.danger` for the destructive one** — everywhere
+they appear, inside `td.rowacts`, which spaces adjacent pills with a CSS rule rather than a
+literal space in each template. This file used to draw them as `.btn.link` (borderless
+coloured text), which was a fork of a shared component: the Postage portal has no
+`.btn.link` at all. `.btn.link` survives with exactly one job — the "Show all" that lifts
+the table render cap, which sits mid-sentence in a footer cell and should look like text.
+Do not reintroduce `.btn.link.danger`; nothing is both a link and destructive.
+
+**Header actions** (`renderHeaderActions()`, into `#hactions`) put Recalculate and Snapshot
+in the header so they are reachable from any tab — Recalculate is the step that makes an
+assumption edit reach Output at all, so it is most wanted from wherever the edit was made.
+Ported from the Postage portal's function of the same name. Neither action is portable on
+its own: `doRecalc` drives `#recalcBtn` and `showOk` writes into whichever screen is on,
+both of which live on the Output tab. So `gotoOutputThen(fn)` switches there first and then
+runs the same function, which also leaves you looking at the table about to change.
+Snapshot asks for its name **before** switching, so cancelling leaves you where you were —
+hence `doSnapshot(presetName)` and its `typeof` guard, which stops a DOM Event being taken
+for a name. `doRecalc` drives whichever Recalculate buttons exist (`recalcButtons()`) and
+re-enables them on all three paths, the blocked one included: `refreshAfterRecalc` redraws
+the Output tab's button but never the header's. Rendered from `boot()` once `initApp` has
+returned, because `isAdmin()` needs `APP.user`; it calls `fitNav()`, since the buttons take
+room the tab row measures against.
 
 ### The sortable, filterable table module
 
