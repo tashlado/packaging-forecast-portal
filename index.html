@@ -1604,6 +1604,13 @@ function renderDims(){
   pane('dims').innerHTML=
   (mayEdit?'':'<div class="warn-box">Your access does not include changing the dimension '+
     'tables (Can_Edit_Dims is N on the Permissions tab), so these are read only.</div>')+
+  '<div class="card"><div class="body"><div class="row tight">'+
+    '<div><div class="small muted">Onboarding a new brand or geo</div>'+
+    '<div class="small" style="margin-top:2px">Bring the lines, rates and mixes across from the '+
+    'segment it most resembles, instead of typing them in one at a time.</div></div>'+
+    '<div class="spacer"></div>'+
+    (mayEdit?'<button class="btn primary" onclick="copySegmentForm(null)">Copy from another</button>':'')+
+  '</div></div></div>'+
   '<div class="grid2">'+
   '<div class="card"><h2>High Level IDs<span class="act">'+
     addBtn('editHL(null)','Add')+'</span></h2>'+
@@ -1643,9 +1650,138 @@ function renderDims(){
       '<td class="rowacts"><button class="btn link" onclick="editArea('+a.Area_ID+')">Edit</button></td>'+
       '</tr>').join('')+'</tbody></table></div>'+
     '<div class="note small muted" style="padding:10px 16px">To add a future breakdown (e.g. Mounjaro Bundles): '+
-      'add a High Level ID with the new WL Detail, then add its Modelling Lines here. The Dashboard will flag '+
-      'the missing rates and mixes to fill in.</div></div>'+
+      'add a High Level ID with the new WL Detail, then use <b>Copy from another</b> above to bring its '+
+      'lines, rates and mixes across from the segment it most resembles.</div></div>'+
   '</div>';
+}
+
+/* ===================== copy a segment =====================
+   The note on this tab used to end "then add its Modelling Lines here", which
+   for a new brand is twenty rows typed one at a time. This is that, done from
+   the segment it most resembles.
+
+   Preview first, always: the confirm step sends back the planKey the preview
+   issued, so it can only ever write the plan that was shown. */
+function copySegmentForm(preHlId){
+  const hls=APP.ref.highLevelIds.filter(h=>String(h.Active).toUpperCase()!=='N');
+  const lineCount=id=>APP.ref.lines.filter(l=>String(l.High_Level_ID)===String(id) &&
+                                              String(l.Active).toUpperCase()!=='N').length;
+  const opt=(sel,skip)=>hls.filter(h=>String(h.High_Level_ID)!==String(skip))
+    .map(h=>'<option value="'+h.High_Level_ID+'"'+(String(sel)===String(h.High_Level_ID)?' selected':'')+'>'+
+      esc(hlLabel(h)+'  ('+lineCount(h.High_Level_ID)+' lines)')+'</option>').join('');
+  modal('Copy a segment',
+    '<div class="fgrid">'+
+    '<div class="w4 hint">Lines are paired on component, so this fills the gaps in the target '+
+      'and never touches what is already there. Nothing is written until you have seen the '+
+      'preview.</div>'+
+    mselectRaw('cs_from','Copy from',opt(preHlId?null:null,null),2)+
+    mselectRaw('cs_to','Copy into',opt(preHlId,null),2)+
+    '<div class="field w4"><label>What to copy</label>'+
+      '<div style="display:flex;gap:16px;flex-wrap:wrap;padding-top:4px">'+
+      copyTick('cs_lines','Modelling lines')+
+      copyTick('cs_rates','Rate card rows')+
+      copyTick('cs_compmix','Component mix rows')+
+      copyTick('cs_ccmix','Cold chain mix rows')+
+      '</div></div>'+
+    '<div class="w4 hint">A target line that already has rates keeps them and is counted as '+
+      'skipped — copying alongside would overlap the periods, which validation calls an error.</div>'+
+    '</div>',
+    '<button class="btn" onclick="closeModal()">Cancel</button>'+
+    '<button class="btn primary" id="csBtn" onclick="copySegmentPreview()">Preview</button>',
+    true);
+}
+function copyTick(id,label){
+  return '<label style="display:flex;align-items:center;gap:6px;font-size:13px">'+
+    '<input type="checkbox" id="'+id+'" checked style="width:auto"> '+esc(label)+'</label>';
+}
+function copyTicked(id){ const el=document.getElementById(id); return !el || el.checked; }
+function copyRequest(){
+  return { fromHlId:v('cs_from'), toHlId:v('cs_to'),
+           lines:copyTicked('cs_lines'), rates:copyTicked('cs_rates'),
+           compMix:copyTicked('cs_compmix'), ccMix:copyTicked('cs_ccmix'), preview:true };
+}
+function copySegmentPreview(){
+  const req=copyRequest();
+  if(String(req.fromHlId)===String(req.toHlId)) return showError('Those are the same High Level ID.');
+  const b=document.getElementById('csBtn');
+  if(b){ b.disabled=true; b.innerHTML='<span class="spinner"></span>Checking…'; }
+  run('copySegment',[req], pv=>copySegmentConfirm(req, pv), err=>{
+    if(b){ b.disabled=false; b.textContent='Preview'; }
+    showError(err.message);
+  });
+}
+function copySegmentConfirm(req, pv){
+  const rowLine=(label,count,skipped)=>
+    '<tr><td>'+esc(label)+'</td><td class="right num">'+count+'</td>'+
+    '<td class="right num muted">'+(skipped||'—')+'</td></tr>';
+  const listOf=(arr,max)=>esc(arr.slice(0,max).map(x=>x.label).join(', '))+
+    (arr.length>max?' and '+(arr.length-max)+' more':'');
+  let warn='';
+  if(!pv.sameArea){
+    /* Components are area-scoped, so a cross-area copy usually pairs almost
+       nothing — and its customer types differ too, which is what would make the
+       copied rates invalid rather than merely wrong. */
+    warn+='<div class="warn-box">These two are in different modelling areas. Components and '+
+      'customer types are defined per area, so most rows will not pair up, and any that do '+
+      'may be priced for customer types the target area does not have.</div>';
+  }
+  if(pv.unpaired.length){
+    warn+='<div class="warn-box">'+pv.unpaired.length+' component(s) on '+esc(pv.fromLabel)+
+      ' have no line here, so nothing under them can be copied: '+listOf(pv.unpaired,6)+
+      '. Tick <b>Modelling lines</b> to create them.</div>';
+  }
+  if(pv.extra.length){
+    warn+='<div class="note small muted">'+pv.extra.length+' component(s) here have no equivalent '+
+      'on '+esc(pv.fromLabel)+', so they get nothing: '+listOf(pv.extra,6)+'.</div>';
+  }
+  if(pv.counts.compMix){
+    warn+='<div class="note small muted">A component mix is a share of a 100% split. Copied into '+
+      'a segment with a different set of components it may no longer total 100% — run Validation '+
+      'afterwards.</div>';
+  }
+  modal('Copy '+pv.total+' row(s) into '+pv.toLabel,
+    '<p class="muted small" style="margin:0 0 10px">From <b>'+esc(pv.fromLabel)+'</b>. '+
+      pv.pairs.length+' component(s) pair up'+
+      (pv.newLines.length?', '+pv.newLines.length+' of them by creating a line':'')+'.</p>'+
+    warn+
+    '<div class="tablewrap"><table><thead><tr><th>What</th><th class="right">To copy</th>'+
+    '<th class="right">Already here</th></tr></thead><tbody>'+
+    rowLine('Modelling lines',pv.counts.lines,pv.skipped.lines)+
+    rowLine('Rate card rows',pv.counts.rates,pv.skipped.rates)+
+    rowLine('Component mix rows',pv.counts.compMix,pv.skipped.compMix)+
+    rowLine('Cold chain mix rows',pv.counts.ccMix,pv.skipped.ccMix)+
+    '</tbody></table></div>'+
+    (pv.total?'':'<div class="note small muted" style="padding-top:10px">Nothing would be '+
+      'copied — everything selected is either already here or has nowhere to go.</div>')+
+    '<div class="hint" style="margin-top:10px">Every row created records where it came from in '+
+      'its Comment, so a rate nobody actually negotiated stays findable.</div>',
+    '<div class="lead muted small">Nothing is written until you press Copy.</div>'+
+    '<button class="btn" onclick="copySegmentForm(\''+esc(String(pv.toHlId))+'\')">Back</button>'+
+    (pv.total?'<button class="btn primary" id="csGo">Copy '+pv.total+' rows</button>':''),
+    true);
+  const go=document.getElementById('csGo');
+  if(go) go.onclick=()=>copySegmentApply(req, pv);
+}
+function copySegmentApply(req, pv){
+  const b=document.getElementById('csGo');
+  if(b){ b.disabled=true; b.innerHTML='<span class="spinner"></span>Copying…'; }
+  const apply=Object.assign({}, req, {preview:false, planKey:pv.planKey});
+  run('copySegment',[apply], res=>{
+    closeModal();
+    showOk('Copied '+res.total+' row(s) into '+res.toLabel+'. '+res.note);
+    DIMUSE=null;
+    run('initApp',[],d=>{
+      APP.ref=d.ref;
+      run('loadAllAppData',[],d2=>{
+        Object.assign(APP,{rates:d2.rates, compMix:d2.compMix, ccMix:d2.ccMix,
+                           activeLines:d2.activeLines, config:d2.config});
+        renderActive();
+      });
+    });
+  }, err=>{
+    if(b){ b.disabled=false; b.textContent='Copy '+pv.total+' rows'; }
+    showError(err.message);
+  }, true);
 }
 function reloadRefAfterDim(){
   /* The usage counts are stale the moment a dimension is saved — a new line

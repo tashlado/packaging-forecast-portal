@@ -207,6 +207,20 @@ function appendDimAmend_(tableName, amendType, rowId, rowObj, perms) {
   sh.appendRow([getNextId(SHEET.DIM_AM, 'Amend_ID'), amendType, new Date(), perms.email, perms.portalName,
                 tableName, rowId, JSON.stringify(rowObj)]);
 }
+/* Many dimension amends in one write, for the same reason appendAmendsBatch_
+   exists: a segment copy creates a line per component, and appendRow is a round
+   trip each. entries: [{type, rowId, rowObj}]. */
+function appendDimAmendsBatch_(tableName, entries, perms) {
+  if (!entries || !entries.length) return 0;
+  const sh = getSheet(SHEET.DIM_AM);
+  const now = new Date();
+  const width = HEADERS[SHEET.DIM_AM].length;
+  const rows = entries.map(e =>
+    padTo_([getNextId(SHEET.DIM_AM, 'Amend_ID'), e.type, now, perms.email, perms.portalName,
+            tableName, e.rowId, JSON.stringify(e.rowObj)], width));
+  sh.getRange(sh.getLastRow() + 1, 1, rows.length, width).setValues(rows);
+  return rows.length;
+}
 function logAction_(perms, action, targetTable, targetId, summary) {
   appendAuditRows_([auditRow_(perms, action, targetTable, targetId, summary, '', '', '')]);
 }
