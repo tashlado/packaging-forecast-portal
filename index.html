@@ -104,6 +104,23 @@ tbody tr.click:hover{background:var(--bg)}
 td.rowacts{white-space:nowrap;text-align:right}
 .comment-cell{max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
+/* ---- sortable, filterable tables ----
+   Ported from the Postage Forecast Portal's OUTPUT table, which is the same
+   component doing the same job: a clickable heading per column and a filter
+   control under it, in a second header row that scrolls with the table.
+
+   The filter row lives in <thead> rather than above the table so that a column
+   and its filter stay the same width and stay together when the table scrolls
+   sideways — which, at thirteen columns, it does. */
+th.sortable{cursor:pointer;user-select:none}
+th.sortable:hover{color:var(--ink)}
+th.sorted{color:var(--ink);font-weight:500}
+th .arrow{margin-left:3px;font-size:9px}
+tr.frow th{padding:3px 6px 6px;border-bottom:1px solid var(--line);font-weight:400}
+tr.frow select,tr.frow input{padding:2px 5px;font-size:11px;border-radius:4px;min-width:0}
+tr.frow .rng{display:flex;gap:3px}
+tr.frow .rng input{width:50%}
+
 /* ---- controls ---- */
 .btn{padding:7px 13px;border-radius:var(--radius);border:1px solid var(--line-2);
      background:var(--surface);font-size:13px;color:var(--ink-2)}
@@ -260,8 +277,11 @@ const APP = {
   user:null, ref:null, config:null,
   rates:[], compMix:[], ccMix:[], fx:[], output:[], audit:[], validation:[], activeLines:0,
   loadState:'loading', activeTab:'dashboard',
-  filters:{ rateBrand:'', rateGeo:'', rateSearch:'', outBrand:'', outGeo:'', outType:'',
-            valSeverity:'', valRule:'' }
+  /* The Rate Card and Output tables keep their own sort and per-column filters
+     in TBL, keyed by table id. What is left here is the Validation tab's two
+     dropdowns and the History search, which are screen filters rather than
+     column ones. */
+  filters:{ valSeverity:'', valRule:'', histSearch:'' }
 };
 const TABS = [
   {id:'dashboard', label:'Dashboard'},
@@ -632,58 +652,262 @@ function renderDashboard(){
     '<tbody>'+gapsHtml+'</tbody></table></div></div>';
 }
 
-/* =========================== rate card =========================== */
-function renderRates(){
-  if(notReady('rates')) return;
-  const brands=[...new Set(APP.ref.highLevelIds.map(h=>h.Brand))].sort();
-  const geos=[...new Set(APP.ref.highLevelIds.map(h=>h.Geo))].sort();
-  const f=APP.filters;
-  let rows=APP.rates.filter(r=>String(r.Active).toUpperCase()!=='N');
-  rows=rows.filter(r=>{
-    const l=lineById(r.Modelling_ID); if(!l) return true;
-    const h=hlById(l.High_Level_ID)||{};
-    if(f.rateBrand && h.Brand!==f.rateBrand) return false;
-    if(f.rateGeo && h.Geo!==f.rateGeo) return false;
-    if(f.rateSearch){
-      const hay=(lineLabel(r.Modelling_ID)+' '+r.Comment+' '+r.Modelling_ID).toLowerCase();
-      if(hay.indexOf(f.rateSearch.toLowerCase())<0) return false;
+/* ================ sortable, filterable tables ================
+   Ported from the Postage Forecast Portal's OUTPUT table. Both portals had the
+   same problem in the same shape: two or three static dropdowns above the table
+   and a hard cap on rendered rows, so anything past the cap was unreachable
+   without editing the Google Sheet.
+
+   A column descriptor is:
+     {key, label, type:'num'|'str', filter:'pick'|'range'|'text'|null,
+      dp, right, cls, title, sort:false, cell:fn, hint}
+
+   The three filter kinds are chosen per column rather than offered everywhere,
+   because the useful question differs: 'pick' for a short closed list (a brand,
+   a customer type), 'range' for a number (rates between 0.3 and 0.5), 'text'
+   for anything open-ended (a comment, an id).
+
+   Filtering and sorting both run over the array already in memory. Nothing here
+   goes near the server. */
+const TBL = {};                      /* id -> {sort, filters, showAll} */
+const TBL_RENDER = {};               /* id -> the render function to call back */
+
+function tState(id){
+  return TBL[id] || (TBL[id] = { sort:{key:'',dir:'asc'}, filters:{}, showAll:false });
+}
+function tActiveFilters(id, cols){
+  const f=tState(id).filters;
+  return cols.filter(c=>{
+    const w=f[c.key];
+    if(c.filter==='range') return !!(w && (w.min!=='' && w.min!==undefined || w.max!=='' && w.max!==undefined));
+    return w!==undefined && w!=='';
+  }).length;
+}
+/* Filter, then sort. In that order, because sorting a set you are about to
+   discard most of is work for nothing. */
+function tRows(id, cols, all){
+  const st=tState(id), f=st.filters;
+  const rows=all.filter(r=>{
+    for(let i=0;i<cols.length;i++){
+      const c=cols[i], want=f[c.key];
+      if(!c.filter) continue;
+      if(c.filter==='range'){
+        if(!want) continue;
+        const n=Number(r[c.key]);
+        if(want.min!=='' && want.min!==undefined && !(n>=Number(want.min))) return false;
+        if(want.max!=='' && want.max!==undefined && !(n<=Number(want.max))) return false;
+      } else if(c.filter==='text'){
+        if(want===undefined || want==='') continue;
+        if(String(r[c.key]==null?'':r[c.key]).toLowerCase().indexOf(String(want).toLowerCase())<0) return false;
+      } else {
+        if(want===undefined || want==='') continue;
+        if(String(r[c.key])!==String(want)) return false;
+      }
     }
     return true;
   });
-  const shown=rows.slice(0,600);
+  if(st.sort.key){
+    const col=cols.filter(c=>c.key===st.sort.key)[0];
+    const dir=st.sort.dir==='desc'?-1:1;
+    rows.sort((a,b)=>{
+      let x=a[st.sort.key], y=b[st.sort.key];
+      if(col && col.type==='num'){ x=Number(x)||0; y=Number(y)||0; return (x-y)*dir; }
+      x=String(x==null?'':x); y=String(y==null?'':y);
+      return (x<y?-1:x>y?1:0)*dir;
+    });
+  }
+  return rows;
+}
+/* The values a pick list offers, narrowed by every OTHER column's filter — so
+   picking a brand leaves only the geos that brand actually ships to, and a
+   combination that matches nothing is never offered. */
+function tPickValues(id, cols, all, key){
+  const f=tState(id).filters, seen={};
+  all.forEach(r=>{
+    for(let i=0;i<cols.length;i++){
+      const c=cols[i];
+      if(c.key===key || !c.filter || c.filter!=='pick') continue;
+      const want=f[c.key];
+      if(want!==undefined && want!=='' && String(r[c.key])!==String(want)) return;
+    }
+    const v=r[key];
+    if(v!==undefined && v!==null && v!=='') seen[v]=1;
+  });
+  const col=cols.filter(c=>c.key===key)[0];
+  return Object.keys(seen).sort((a,b)=>
+    (col && col.type==='num') ? (Number(a)-Number(b)) : (a<b?-1:a>b?1:0));
+}
+function tHead(id, cols, all){
+  const st=tState(id), f=st.filters;
+  let h='<thead><tr>';
+  cols.forEach(c=>{
+    const sorted=st.sort.key===c.key;
+    const arrow=sorted?'<span class="arrow">'+(st.sort.dir==='desc'?'&#9662;':'&#9652;')+'</span>':'';
+    const sortable=c.sort!==false;
+    h+='<th'+(c.right?' class="right':' class="')+(sortable?' sortable':'')+(sorted?' sorted':'')+'"'+
+       (sortable?' onclick="tSort(\''+id+'\',\''+c.key+'\')"':'')+
+       (c.hint?' title="'+esc(c.hint)+'"':'')+'>'+esc(c.label)+arrow+'</th>';
+  });
+  h+='</tr><tr class="frow">';
+  cols.forEach(c=>{
+    const tf=id+'|'+c.key;
+    if(c.filter==='range'){
+      const w=f[c.key]||{};
+      h+='<th><div class="rng">'+
+        '<input data-tf="'+tf+'-min" type="number" step="any" placeholder="min" value="'+
+          esc(w.min===undefined?'':w.min)+'" oninput="tRange(\''+id+'\',\''+c.key+'\',\'min\',this.value)">'+
+        '<input data-tf="'+tf+'-max" type="number" step="any" placeholder="max" value="'+
+          esc(w.max===undefined?'':w.max)+'" oninput="tRange(\''+id+'\',\''+c.key+'\',\'max\',this.value)">'+
+        '</div></th>';
+    } else if(c.filter==='text'){
+      h+='<th><input data-tf="'+tf+'" type="text" placeholder="contains" value="'+
+        esc(f[c.key]===undefined?'':f[c.key])+'" oninput="tSet(\''+id+'\',\''+c.key+'\',this.value)"></th>';
+    } else if(c.filter==='pick'){
+      const cur=f[c.key]===undefined?'':f[c.key];
+      h+='<th><select data-tf="'+tf+'" onchange="tSet(\''+id+'\',\''+c.key+'\',this.value)">'+
+        '<option value="">All</option>'+
+        tPickValues(id,cols,all,c.key).map(v=>'<option value="'+esc(v)+'"'+
+          (String(v)===String(cur)?' selected':'')+'>'+esc(v)+'</option>').join('')+
+        '</select></th>';
+    } else h+='<th></th>';
+  });
+  return h+'</tr></thead>';
+}
+function tBody(id, cols, rows, cap, emptyMsg){
+  if(!rows.length){
+    return '<tbody><tr><td colspan="'+cols.length+'" class="muted">'+
+      esc(emptyMsg||'Nothing matches these filters.')+'</td></tr></tbody>';
+  }
+  const st=tState(id);
+  const shown=st.showAll?rows:rows.slice(0,cap);
+  let h='<tbody>';
+  shown.forEach(r=>{
+    h+='<tr>';
+    cols.forEach(c=>{
+      if(c.cell){ h+=c.cell(r); return; }
+      const raw=r[c.key];
+      const txt=(c.dp!==undefined)?num(raw,c.dp):(raw==null?'':String(raw));
+      h+='<td class="'+(c.right?'right num ':'')+(c.cls||'')+'"'+
+         (c.title?' title="'+esc(raw==null?'':raw)+'"':'')+'>'+esc(txt)+'</td>';
+    });
+    h+='</tr>';
+  });
+  if(rows.length>shown.length){
+    /* The cap used to be the end of the road: there was no way to reach a row
+       past it short of editing the Sheet. Now it is a rendering concession with
+       three ways out — narrow a filter, sort the column that matters to the top,
+       or lift it. */
+    h+='<tr><td colspan="'+cols.length+'" class="muted" style="padding:10px 8px">'+
+      'Showing the first '+shown.length+' of '+rows.length+' matching rows. '+
+      '<button class="btn link" onclick="tShowAll(\''+id+'\')">Show all '+rows.length+'</button>'+
+      ' — or narrow a filter, or sort by the column you care about.</td></tr>';
+  }
+  return h+'</tbody>';
+}
+/* The line above the table: how much is showing, and how to stop filtering. */
+function tToolbar(id, cols, shown, total){
+  const active=tActiveFilters(id, cols);
+  return '<span class="small"><b>'+shown+'</b> of '+total+' row'+(total===1?'':'s')+
+    (active?' &middot; '+active+' filter'+(active===1?'':'s')+' on':'')+'</span>'+
+    (active||tState(id).sort.key||tState(id).showAll
+      ? '<button class="btn sm" onclick="tClear(\''+id+'\')">Clear filters &amp; sort</button>':'')+
+    '<span class="small muted">Click a heading to sort.</span>';
+}
+function tSort(id, key){
+  const st=tState(id);
+  st.sort = (st.sort.key===key && st.sort.dir==='asc') ? {key:key,dir:'desc'}
+          : (st.sort.key===key && st.sort.dir==='desc') ? {key:'',dir:'asc'}
+          : {key:key,dir:'asc'};
+  tRerender(id);
+}
+function tSet(id, key, val){ tState(id).filters[key]=val; tRerender(id); }
+function tRange(id, key, which, val){
+  const f=tState(id).filters;
+  f[key]=f[key]||{};
+  f[key][which]=val;
+  tRerender(id);
+}
+function tClear(id){ TBL[id]={ sort:{key:'',dir:'asc'}, filters:{}, showAll:false }; tRerender(id); }
+function tShowAll(id){ tState(id).showAll=true; tRerender(id); }
+/* Re-render the screen, then put the cursor back where it was.
+   The panes are rebuilt with innerHTML, which destroys the input being typed
+   into — so a text filter would lose focus on every keystroke and be unusable.
+   The control is found again by its data-tf, and the caret restored with it. */
+function tRerender(id){
+  const a=document.activeElement;
+  const tf=(a && a.getAttribute) ? a.getAttribute('data-tf') : null;
+  const start=tf?a.selectionStart:null, end=tf?a.selectionEnd:null;
+  (TBL_RENDER[id]||function(){})();
+  if(!tf) return;
+  const el=document.querySelector('[data-tf="'+tf+'"]');
+  if(!el) return;
+  el.focus();
+  /* A number or select input throws on setSelectionRange; focus alone is the
+     whole point for those anyway. */
+  try{ if(start!==null) el.setSelectionRange(start,end); }catch(e){}
+}
+
+/* =========================== rate card =========================== */
+/* The rate card, flattened. Brand, Geo, Treatment and Component live on the
+   line's High Level ID and its component rather than on the rate row, and they
+   are what people filter and sort by — so they are resolved once here and become
+   real columns, instead of being buried inside a single "Line" label that could
+   only be searched as free text. */
+const RATE_COLS = [
+  {key:'Rate_ID',       label:'#',         type:'num', filter:'text', right:true},
+  {key:'Modelling_ID',  label:'Line',      type:'num', filter:'text', right:true,
+   hint:'The Modelling_ID this rate is filed under'},
+  {key:'Brand',         label:'Brand',     type:'str', filter:'pick'},
+  {key:'Geo',           label:'Geo',       type:'str', filter:'pick'},
+  {key:'Treatment_Type',label:'Treatment', type:'str', filter:'pick'},
+  {key:'Component',     label:'Component', type:'str', filter:'pick'},
+  {key:'CC_Flag',       label:'CC',        type:'str', filter:'pick',
+   hint:'CC weights the rate by the cold chain share, Ambient by one minus it, Both by neither'},
+  {key:'Customer_Type', label:'Type',      type:'str', filter:'pick'},
+  {key:'From_Date',     label:'From',      type:'str', filter:'text'},
+  {key:'To_Date',       label:'To',        type:'str', filter:'text'},
+  {key:'CPU',           label:'CPU',       type:'num', filter:'range', right:true, dp:4},
+  {key:'QTY',           label:'QTY',       type:'num', filter:'range', right:true, dp:2},
+  {key:'Comment',       label:'Comment',   type:'str', filter:'text', cls:'comment-cell', title:true},
+  {key:'_acts',         label:'',          sort:false, filter:null, cell:r=>
+    '<td class="rowacts">'+
+      '<button class="btn link" onclick="openRecordHistory(\'Rate_Card\','+r.Rate_ID+
+        ',\'rate #'+r.Rate_ID+'\')" title="What this rate said on a given date">History</button>'+
+      (canEditRates()?
+      '<button class="btn link" onclick="openRateModal('+r.Rate_ID+')">Edit</button>'+
+      '<button class="btn link danger" onclick="delRate('+r.Rate_ID+')">Delete</button>':'')+'</td>'}
+];
+const RATE_RENDER_CAP = 600;
+
+function rateRowsAll(){
+  return APP.rates.filter(r=>String(r.Active).toUpperCase()!=='N').map(r=>{
+    const l=lineById(r.Modelling_ID)||{};
+    const h=hlById(l.High_Level_ID)||{};
+    const c=compById(l.Component_ID)||{};
+    return Object.assign({}, r, {
+      Brand:h.Brand||'', Geo:h.Geo||'', Treatment_Type:h.Treatment_Type||'',
+      Component:c.Component||'', High_Level_Component:c.High_Level_Component||''
+    });
+  });
+}
+
+TBL_RENDER.rates = function(){ renderRates(); };
+function renderRates(){
+  if(notReady('rates')) return;
+  const all=rateRowsAll();
+  const rows=tRows('rates', RATE_COLS, all);
   pane('rates').innerHTML=
     '<div class="card"><div class="body"><div class="row tight">'+
-    '<div class="field filter"><label>Brand</label><select onchange="APP.filters.rateBrand=this.value;renderRates()">'+
-      '<option value="">All brands</option>'+selOptions(f.rateBrand,brands)+'</select></div>'+
-    '<div class="field filter"><label>Geo</label><select onchange="APP.filters.rateGeo=this.value;renderRates()">'+
-      '<option value="">All geos</option>'+selOptions(f.rateGeo,geos)+'</select></div>'+
-    '<div class="field filter"><label>Search</label><input type="text" placeholder="Component, comment or ID" '+
-      'value="'+esc(f.rateSearch)+'" oninput="APP.filters.rateSearch=this.value;renderRates()"></div>'+
+    tToolbar('rates', RATE_COLS, Math.min(rows.length, tState('rates').showAll?rows.length:RATE_RENDER_CAP), all.length)+
     '<div class="spacer"></div>'+
     (canEditRates()?'<button class="btn" onclick="openBulkRates()">Bulk update</button>':'')+
     (canEditRates()?'<button class="btn primary" onclick="openRateModal(null)">Add rate</button>':'')+
     '</div></div></div>'+
-    '<div class="card"><div class="tablewrap"><table><thead><tr>'+
-    '<th>#</th><th>Line</th><th>CC</th><th>Type</th><th>From</th><th>To</th>'+
-    '<th class="right">CPU</th><th class="right">QTY</th><th>Comment</th><th></th>'+
-    '</tr></thead><tbody>'+
-    (shown.length?shown.map(r=>'<tr>'+
-      '<td class="num">'+r.Rate_ID+'</td><td>'+esc(lineLabel(r.Modelling_ID))+'</td>'+
-      '<td>'+esc(r.CC_Flag)+'</td><td>'+esc(r.Customer_Type)+'</td>'+
-      '<td>'+esc(r.From_Date)+'</td><td>'+esc(r.To_Date)+'</td>'+
-      '<td class="right num">'+num(r.CPU)+'</td><td class="right num">'+num(r.QTY,2)+'</td>'+
-      '<td class="comment-cell" title="'+esc(r.Comment)+'">'+esc(r.Comment)+'</td>'+
-      '<td class="rowacts">'+
-        '<button class="btn link" onclick="openRecordHistory(\'Rate_Card\','+r.Rate_ID+
-          ',\'rate #'+r.Rate_ID+'\')" title="What this rate said on a given date">History</button>'+
-        (canEditRates()?
-        '<button class="btn link" onclick="openRateModal('+r.Rate_ID+')">Edit</button>'+
-        '<button class="btn link danger" onclick="delRate('+r.Rate_ID+')">Delete</button>':'')+'</td>'+
-      '</tr>').join('')
-     :'<tr><td colspan="10" class="muted">No rates match these filters.</td></tr>')+
-    '</tbody></table></div>'+
-    '<div class="note small muted" style="padding:8px 16px">'+rows.length+' rows'+
-      (rows.length>shown.length?' (showing first '+shown.length+' — narrow the filters)':'')+'</div></div>';
+    '<div class="card"><div class="tablewrap"><table>'+
+    tHead('rates', RATE_COLS, all)+
+    tBody('rates', RATE_COLS, rows, RATE_RENDER_CAP,
+          all.length?'No rates match these filters.':'No rate card rows yet.')+
+    '</table></div></div>';
 }
 function openRateModal(rateId){
   const r = rateId ? APP.rates.find(x=>String(x.Rate_ID)===String(rateId)) : null;
@@ -1228,23 +1452,43 @@ function delCC(id){
 }
 
 /* ============================ output ============================ */
+const OUTPUT_COLS = [
+  {key:'High_Level_ID',       label:'HL',           type:'num', filter:'pick', right:true},
+  {key:'Month',               label:'Month',        type:'str', filter:'pick'},
+  {key:'Customer_Type',       label:'Type',         type:'str', filter:'pick'},
+  {key:'Brand',               label:'Brand',        type:'str', filter:'pick'},
+  {key:'Geo',                 label:'Geo',          type:'str', filter:'pick'},
+  {key:'Treatment_Type',      label:'Treatment',    type:'str', filter:'pick'},
+  {key:'WL_Detail',           label:'Detail',       type:'str', filter:'pick'},
+  {key:'Currency',            label:'Ccy',          type:'str', filter:'pick'},
+  {key:'Cost_Local',          label:'Cost (local)', type:'num', filter:'range', right:true, dp:4,
+   hint:'Blended packaging cost per order for this segment that month, in the segment currency'},
+  {key:'Cost_GBP',            label:'Cost (GBP)',   type:'num', filter:'range', right:true, dp:4},
+  {key:'Snapshot_Cost_Local', label:'Snapshot',     type:'num', filter:'range', right:true, dp:4},
+  {key:'Variance_Local',      label:'Variance',     type:'num', filter:'range', right:true, cell:r=>
+    '<td class="right num '+(Number(r.Variance_Local)>0.0001?'up':
+                             Number(r.Variance_Local)<-0.0001?'down':'')+'">'+
+      esc(num(r.Variance_Local))+'</td>'}
+];
+const OUTPUT_RENDER_CAP = 800;
+
+/* Month is stored as a first-of-month date and read as a month, everywhere — the
+   table, the filter list and the CSV. Normalised once here so the pick list
+   offers "2026-03" rather than a dozen shapes of the same month. */
+function outputAllRows(){
+  return APP.output.map(r=>Object.assign({}, r, { Month:String(r.Month||'').slice(0,7) }));
+}
+
+TBL_RENDER.output = function(){ renderOutput(); };
 function renderOutput(){
   if(notReady('output')) return;
-  const brands=[...new Set(APP.ref.highLevelIds.map(h=>h.Brand))].sort();
-  const geos=[...new Set(APP.ref.highLevelIds.map(h=>h.Geo))].sort();
-  const f=APP.filters;
-  const rows=outputVisibleRows();
-  const shown=rows.slice(0,800);
+  const all=outputAllRows();
+  const rows=tRows('output', OUTPUT_COLS, all);
   const snapOpts=['(none)'].concat(APP.ref.snapshots)
     .map(s=>'<option'+((APP.config.compareSnapshot||'(none)')===s?' selected':'')+'>'+esc(s)+'</option>').join('');
   pane('output').innerHTML=
     '<div class="card"><div class="body"><div class="row tight">'+
-    '<div class="field filter"><label>Brand</label><select onchange="APP.filters.outBrand=this.value;renderOutput()">'+
-      '<option value="">All brands</option>'+selOptions(f.outBrand,brands)+'</select></div>'+
-    '<div class="field filter"><label>Geo</label><select onchange="APP.filters.outGeo=this.value;renderOutput()">'+
-      '<option value="">All geos</option>'+selOptions(f.outGeo,geos)+'</select></div>'+
-    '<div class="field filter"><label>Customer type</label><select onchange="APP.filters.outType=this.value;renderOutput()">'+
-      '<option value="">All types</option>'+selOptions(f.outType,['New','Repeat','OTC'])+'</select></div>'+
+    tToolbar('output', OUTPUT_COLS, Math.min(rows.length, tState('output').showAll?rows.length:OUTPUT_RENDER_CAP), all.length)+
     '<div class="spacer"></div>'+
     /* Recalculate, Snapshot and the comparison baseline are portal-wide — they move
        every area at once — so they are Admin's, and the server re-checks. Export
@@ -1261,35 +1505,18 @@ function renderOutput(){
       (isAdmin()?'':' Recalculating and snapshotting are Admin-only, because they move every '+
         'modelling area at once.')+'</div>'+
     '</div></div>'+
-    '<div class="card"><div class="tablewrap"><table><thead><tr>'+
-    '<th>HL</th><th>Month</th><th>Type</th><th>Brand</th><th>Geo</th><th>Treatment</th><th>Detail</th><th>Ccy</th>'+
-    '<th class="right">Cost (local)</th><th class="right">Cost (GBP)</th><th class="right">Snapshot</th>'+
-    '<th class="right">Variance</th></tr></thead><tbody>'+
-    (shown.length?shown.map(r=>'<tr><td class="num">'+r.High_Level_ID+'</td>'+
-      '<td>'+esc(String(r.Month).slice(0,7))+'</td><td>'+esc(r.Customer_Type)+'</td>'+
-      '<td>'+esc(r.Brand)+'</td><td>'+esc(r.Geo)+'</td><td>'+esc(r.Treatment_Type)+'</td>'+
-      '<td>'+esc(r.WL_Detail)+'</td><td>'+esc(r.Currency)+'</td>'+
-      '<td class="right num">'+num(r.Cost_Local)+'</td><td class="right num">'+num(r.Cost_GBP)+'</td>'+
-      '<td class="right num">'+num(r.Snapshot_Cost_Local)+'</td>'+
-      '<td class="right num '+(Number(r.Variance_Local)>0.0001?'up':Number(r.Variance_Local)<-0.0001?'down':'')+'">'+
-        num(r.Variance_Local)+'</td></tr>').join('')
-     :'<tr><td colspan="12" class="muted">Nothing to show — recalculate, or widen the filters.</td></tr>')+
-    '</tbody></table></div>'+
-    '<div class="note small muted" style="padding:8px 16px">'+rows.length+' rows'+
-      (rows.length>shown.length?' (showing first '+shown.length+')':'')+'</div></div>';
+    '<div class="card"><div class="tablewrap"><table>'+
+    tHead('output', OUTPUT_COLS, all)+
+    tBody('output', OUTPUT_COLS, rows, OUTPUT_RENDER_CAP,
+          all.length?'Nothing matches these filters.':'Nothing to show — recalculate first.')+
+    '</table></div></div>';
 }
 /* ---------------------- output CSV export ----------------------
-   Exports the filtered set, not the rendered slice. The 800-row cap on the table
-   is a rendering concession, and an export that quietly stopped at it would be
+   Exports the filtered and sorted set, not the rendered slice. The render cap is
+   a concession to the browser, and an export that quietly stopped at it would be
    wrong in exactly the case a CSV is wanted for. */
 function outputVisibleRows(){
-  const f=APP.filters;
-  return APP.output.filter(r=>{
-    if(f.outBrand && r.Brand!==f.outBrand) return false;
-    if(f.outGeo && r.Geo!==f.outGeo) return false;
-    if(f.outType && r.Customer_Type!==f.outType) return false;
-    return true;
-  });
+  return tRows('output', OUTPUT_COLS, outputAllRows());
 }
 /* The columns on screen, in the order they appear, plus Compare_Snapshot: on the
    page that fact lives in the "Compare vs" selector because it is the same for
@@ -1317,9 +1544,15 @@ function csvCell(v){
   const t=(v===null||v===undefined)?'':String(v);
   return /[",\r\n]/.test(t) ? '"'+t.replace(/"/g,'""')+'"' : t;
 }
+/* The filename says what is in the file, so a folder of exports can be told
+   apart without opening them. Every pick filter that is on contributes its
+   value; a range filter would make the name unreadable and is left out. */
 function outputCsvName(n){
-  const f=APP.filters, bits=['packaging-output'];
-  [f.outBrand,f.outGeo,f.outType].forEach(x=>{ if(x) bits.push(String(x).toLowerCase()); });
+  const f=tState('output').filters, bits=['packaging-output'];
+  OUTPUT_COLS.forEach(c=>{
+    if(c.filter!=='pick') return;
+    if(f[c.key]) bits.push(String(f[c.key]).toLowerCase());
+  });
   bits.push(n+'rows');
   return bits.join('-').replace(/[^a-z0-9-]/gi,'')+'.csv';
 }
