@@ -324,6 +324,7 @@ function applyCopySegment_(fromHl, toHl, want, plan, perms) {
     });
     sh.getRange(sh.getLastRow() + 1, 1, rows.length, width).setValues(rows);
     invalidateSheetCache(SHEET.LINES);
+    dimUsageInvalidate_();
     appendDimAmendsBatch_(SHEET.LINES, rows.map(r =>
       ({ type: 'CREATE', rowId: r[c.Modelling_ID], rowObj: r })), perms);
     written.lines = rows.length;

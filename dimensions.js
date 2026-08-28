@@ -35,6 +35,10 @@ function _upsertDim_(sheetName, idHeader, obj, buildRow, summary, opts) {
         if (o.guard) o.guard(before, c);
         const rowVals = buildRow(Number(obj.id), data[i].slice(), c);
         sh.getRange(i + 1, 1, 1, rowVals.length).setValues([rowVals]);
+        /* A save changes what points where, so the counts the guards just read
+           are stale from here on. Same contract as invalidateSheetCache. */
+        invalidateSheetCache(sheetName);
+        dimUsageInvalidate_();
         appendDimAmend_(sheetName, 'UPDATE', obj.id, rowVals, perms);
         logFieldChanges_(perms, 'UPDATE_DIM', sheetName, obj.id, before, rowVals,
                          HEADERS[sheetName], { summary: summary });
@@ -45,6 +49,8 @@ function _upsertDim_(sheetName, idHeader, obj, buildRow, summary, opts) {
     const newId = getNextId(sheetName, idHeader);
     const rowVals = buildRow(newId, new Array(Object.keys(c).length).fill(''), c);
     sh.appendRow(rowVals);
+    invalidateSheetCache(sheetName);
+    dimUsageInvalidate_();
     appendDimAmend_(sheetName, 'CREATE', newId, rowVals, perms);
     logAction_(perms, 'CREATE_DIM', sheetName, newId, summary);
     return { id: newId };

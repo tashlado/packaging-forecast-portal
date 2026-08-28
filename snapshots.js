@@ -93,6 +93,8 @@ function listSnapshots() {
  * Viewer: it reads two things a Viewer can already see. Taking a snapshot is
  * Admin, because that writes; reading one back is not.
  */
+const SNAP_DIFF_ROWS = 300;
+
 function compareSnapshots(fromName, toName) {
   requireViewer();
   prewarmSheetCache_([SHEET.SNAPSHOTS, SHEET.OUTPUT, SHEET.HL, SHEET.PERMISSIONS]);
@@ -196,8 +198,6 @@ function compareSnapshots(fromName, toName) {
     truncated: Math.max(0, diffs.length - SNAP_DIFF_ROWS)
   };
 }
-
-const SNAP_DIFF_ROWS = 300;
 
 /* Month as 'yyyy-mm': the snapshot and Output store a first-of-month Date, and
    comparing those raw depends on which of the three shapes each was read as. */
