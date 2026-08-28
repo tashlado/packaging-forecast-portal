@@ -400,6 +400,11 @@ function applyBulkRateChange_(p, plan, perms) {
     /* Re-checked here rather than trusted from the plan: the plan ran outside the
        lock, and a per-row rights check is what every single save does. */
     if (perms.rank < ROLE_RANK.Admin && !canAccessArea_(perms, it.areaId)) {
+      /* Inside the lock, unlike every other logDenied_ call — this is the per-row
+         re-check, and the row it stops on is the only place the area is known. The
+         write is abandoned whole, so one row records the whole refusal. */
+      logDenied_(perms, 'AREA', it.areaId,
+        'bulk rate change refused at rate #' + it.rateId + ' — scoped to ' + areasText_(perms));
       throw new Error('You do not have edit access to modelling area ' + it.areaId + '.');
     }
     if (String(data[i][c.Rate_ID]) !== String(it.rateId)) {

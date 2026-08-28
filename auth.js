@@ -114,9 +114,29 @@ function canAccessArea_(perms, areaId) {
   return perms.allAreas || perms.areas.indexOf(Number(areaId)) >= 0;
 }
 
+/* ---------------- refusals are recorded ----------------
+ *
+ * Each gate below logs before it throws. logDenied_ never throws and never gates
+ * (see utils.js), so the message the caller gets is unchanged and a logging
+ * failure cannot mask a permission failure.
+ *
+ * Exactly one row per refused call, because the gates nest rather than sit side
+ * by side: requireEditRatesForArea_ is requireEditorForArea_ is requireEditor,
+ * and the first to say no is the one that throws. The row that lands is
+ * therefore the innermost reason — "not an Editor" rather than "no editRates"
+ * for somebody who is neither, which is the one an Admin can act on.
+ *
+ * What is deliberately NOT logged is initApp returning {authorised:false} for an
+ * unknown email. That is the shell saying "you are not set up", not an action
+ * being refused, and it fires on every page load — a row per refresh would bury
+ * the refusals worth reading. Such a person cannot reach a gate anyway: the
+ * client draws the not-in-Permissions panel and calls nothing else.
+ */
 function requireRole_(minRole) {
   const perms = getUserPermissions();
   if (perms.rank < ROLE_RANK[minRole]) {
+    logDenied_(perms, 'PORTAL', minRole,
+      'needs ' + minRole + ' access; this account is ' + roleText_(perms));
     throw new Error('You do not have ' + minRole + ' access to this portal. Ask an Admin to update the Permissions tab.');
   }
   return perms;
@@ -128,9 +148,30 @@ function requireAdmin()  { return requireRole_('Admin'); }
 function requireEditorForArea_(areaId) {
   const perms = requireEditor();
   if (perms.rank < ROLE_RANK.Admin && !canAccessArea_(perms, areaId)) {
+    logDenied_(perms, 'AREA', areaId, 'edit refused — scoped to ' + areasText_(perms));
     throw new Error('You do not have edit access to this modelling area.');
   }
   return perms;
+}
+
+/* What a refusal row should say the account actually is. Rank 0 has two causes
+   worth telling apart, because they are fixed differently: no matching active
+   row at all (getUserPermissions calls that role 'None'), or a row whose Role
+   cell holds something ROLE_RANK does not recognise — a typo, which reads as no
+   access and is invisible on the tab itself. */
+function roleText_(perms) {
+  if (perms.rank) return perms.role;
+  const r = safeStr(perms.role);
+  return (r && r !== 'None')
+    ? 'set to an unrecognised role "' + r + '"'
+    : 'not in the Permissions tab, or its row is switched off';
+}
+
+/* And what its area scope is, so the refusal is readable without opening the
+   Permissions tab alongside it. */
+function areasText_(perms) {
+  if (perms.allAreas) return 'ALL';
+  return perms.areas.length ? 'areas ' + perms.areas.join(',') : 'no areas';
 }
 
 /* ---------------- capability gates ----------------
@@ -143,6 +184,9 @@ function requireCapability_(perms, cap) {
   const spec = CAPS[cap];
   if (!spec) throw new Error('Unknown capability "' + cap + '".');
   if (perms.caps && perms.caps[cap]) return perms;
+  /* An unknown capability is a programming error and threw above. This is the
+     real refusal, so this is the one that leaves a row. */
+  logDenied_(perms, 'CAPABILITY', cap, spec.col + ' is N — cannot ' + spec.what);
   throw new Error('Your access does not let you ' + spec.what + '. ' +
     'The ' + spec.col + ' column on the Permissions tab is set to N for ' + perms.email +
     ' — ask an Admin to change it.');
@@ -170,6 +214,7 @@ function requireEditMixesForArea_(areaId) {
 function requireEditDimsForArea_(areaId) {
   const perms = requireAdmin();
   if (perms.rank < ROLE_RANK.Admin && !canAccessArea_(perms, areaId)) {
+    logDenied_(perms, 'AREA', areaId, 'dimension edit refused — scoped to ' + areasText_(perms));
     throw new Error('You do not have edit access to this modelling area.');
   }
   return requireCapability_(perms, 'editDims');

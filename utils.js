@@ -252,6 +252,53 @@ function auditRow_(perms, action, targetTable, targetId, summary, field, oldVal,
           oldVal === undefined ? '' : oldVal, newVal === undefined ? '' : newVal];
 }
 
+/**
+ * A refusal, written down.
+ *
+ * Every gate in auth.js used to do one thing when it said no: throw. That tells
+ * the person standing in front of it and nobody else. The signal an Admin
+ * actually needs — somebody reaching repeatedly for an area they are not scoped
+ * to, or a capability column sitting at N that was never meant to be — only
+ * exists if the refusal leaves a row behind. So it does, under the action
+ * DENIED, in the same Audit_Log the History screen already reads.
+ *
+ * Three properties, all load-bearing:
+ *
+ *   It never throws. A refusal is already the unhappy path. A logging failure on
+ *   top of it must not replace the readable "you cannot do this" with a
+ *   spreadsheet error, and must not stop the throw that follows — so the caller
+ *   logs and then throws, and this swallows everything.
+ *
+ *   It never gates. It reads the perms object the caller already resolved and
+ *   calls no require* function of its own, so recording a refusal cannot recurse
+ *   into a second one.
+ *
+ *   It writes outside the lock, because that is where the gates run — every
+ *   entry point checks rights before withLock. Taking the script lock to record
+ *   a refusal would queue refused calls behind real writes, and releasing it
+ *   mid-write would be worse. The cost is that two refusals in the same instant
+ *   can be allotted the same Log_ID: getNextId is a per-execution max+1 rather
+ *   than a reservation. Nothing keys on Log_ID — it only has to be roughly
+ *   ascending — so a collision is a dent in the numbering, not a lost row.
+ *
+ * scope says what kind of check refused, and is one of:
+ *   'PORTAL'      a rank floor  — targetId is the role that was needed
+ *   'AREA'        a scope check — targetId is the Area_ID
+ *   'CAPABILITY'  a column on Permissions — targetId is the capability key
+ * They land in Target_Table and Target_ID, which is what the History screen
+ * shows as Table and Target. Field, Old_Value and New_Value stay empty: nothing
+ * changed, which is the point.
+ */
+function logDenied_(perms, scope, targetId, reason) {
+  try {
+    appendAuditRows_([auditRow_(perms || { email: '(unknown)' }, 'DENIED',
+      scope, targetId, reason, '', '', '')]);
+    invalidateSheetCache(SHEET.AUDIT);
+  } catch (err) {
+    Logger.log('DENIED audit write failed (continuing): ' + err.message);
+  }
+}
+
 /* Columns every save touches by definition. Both are already on the audit row
    itself — Timestamp and Email say the same thing — so diffing them would double
    the row count to record nothing. */

@@ -48,6 +48,12 @@ function requireRecordHistory_(areaId) {
   if (perms.rank >= ROLE_RANK.Editor && (perms.rank >= ROLE_RANK.Admin || canAccessArea_(perms, areaId))) {
     return perms;
   }
+  /* Logged here rather than left to requireCapability_: this gate is an OR of two
+     conditions and neither half failed on its own — the account has viewer rank,
+     it just has neither route in. The target is the area, because that is the half
+     an Admin would widen. */
+  logDenied_(perms, 'AREA', areaId,
+    'record history refused — no Can_View_Audit and no edit access to the area');
   throw new Error('Reading a record\'s history needs either edit access to its modelling area ' +
     'or Can_View_Audit on the Permissions tab.');
 }
