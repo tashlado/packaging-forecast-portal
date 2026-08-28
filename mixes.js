@@ -26,7 +26,7 @@ function saveComponentMixGroup(payload) {
   const hlRows = tableToObjects_(SHEET.HL);
   const hl = hlRows.find(h => String(h.High_Level_ID) === String(payload.highLevelId));
   if (!hl) throw new Error('High Level ID not found.');
-  const perms = requireEditorForArea_(hl.Area_ID);
+  const perms = requireEditMixesForArea_(hl.Area_ID);
 
   const compById = {};
   comps.forEach(cp => compById[cp.Component_ID] = cp);
@@ -150,7 +150,7 @@ function saveCCMix(cc) {
   prewarmForWrite_([SHEET.CC_MIX, SHEET.CC_MIX_AM]);
   const hl = tableToObjects_(SHEET.HL).find(h => String(h.High_Level_ID) === String(cc.highLevelId));
   if (!hl) throw new Error('High Level ID not found.');
-  const perms = requireEditorForArea_(hl.Area_ID);
+  const perms = requireEditMixesForArea_(hl.Area_ID);
 
   const from = normDate(cc.fromDate), to = normDate(cc.toDate);
   if (!from || !to) throw new Error('From and To dates are required.');
@@ -210,7 +210,7 @@ function deleteCCMix(ccMixId) {
     for (let i = 1; i < data.length; i++) {
       if (String(data[i][c.CC_Mix_ID]) !== String(ccMixId)) continue;
       const hl = tableToObjects_(SHEET.HL).find(h => String(h.High_Level_ID) === String(data[i][c.High_Level_ID]));
-      const perms = requireEditorForArea_(hl ? hl.Area_ID : -1);
+      const perms = requireEditMixesForArea_(hl ? hl.Area_ID : -1);
       sh.getRange(i + 1, c.Active + 1).setValue('N');
       sh.getRange(i + 1, c.Updated_At + 1).setValue(new Date());
       sh.getRange(i + 1, c.Updated_By + 1).setValue(perms.email);

@@ -271,7 +271,9 @@ const TABS = [
   {id:'output',    label:'Output'},
   {id:'validation',label:'Validation'},
   {id:'dims',      label:'Lookups', admin:true},
-  {id:'history',   label:'History', admin:true}
+  /* Gated on the Can_View_Audit capability rather than on Admin rank, so change
+     history can be granted without handing over everything else an Admin can do. */
+  {id:'history',   label:'History', cap:'viewAudit'}
 ];
 /* Never collapsed into the More menu, however narrow the window gets. */
 const NAV_ALWAYS = ['dashboard','rates','compmix','output'];
@@ -358,6 +360,25 @@ window.onload = function(){
 function isAdmin(){ return APP.user && APP.user.role==='Admin'; }
 function isEditor(){ return APP.user && (APP.user.role==='Editor'||APP.user.role==='Admin'); }
 
+/* ---- capability columns (Permissions tab) ----
+   Hiding a control this way is cosmetic: every server endpoint re-checks. But a
+   button that always fails is worse than no button, so the ones a capability
+   turns off are not drawn.
+
+   A payload from before the columns existed carries no caps object. Falling back
+   to the rank is what a blank cell resolves to server side, so old and new agree. */
+function can(cap){
+  const c = APP.user && APP.user.caps;
+  if(!c) return cap==='viewAudit' ? isAdmin() : true;
+  return !!c[cap];
+}
+/* Each edit capability still needs the rank in front of it, exactly as
+   requireEditRatesForArea_ and friends do on the server. */
+function canEditRates(){ return isEditor() && can('editRates'); }
+function canEditMixes(){ return isEditor() && can('editMixes'); }
+function canEditDims(){  return isAdmin()  && can('editDims'); }
+function canViewAudit(){ return can('viewAudit'); }
+
 /** "Tash Lado" -> "TL", with the full name and role on hover. */
 function initialsOf(name){
   const parts = String(name||'').trim().split(/\s+/).filter(Boolean);
@@ -367,7 +388,7 @@ function initialsOf(name){
 }
 
 /* ============================== nav ============================== */
-function navTabs(){ return TABS.filter(t => !t.admin || isAdmin()); }
+function navTabs(){ return TABS.filter(t => (!t.admin || isAdmin()) && (!t.cap || can(t.cap))); }
 function buildTabPanes(){
   document.getElementById('screens').innerHTML =
     TABS.map(t => '<div class="screen" id="pane-'+t.id+'"></div>').join('');
@@ -613,8 +634,8 @@ function renderRates(){
     '<div class="field filter"><label>Search</label><input type="text" placeholder="Component, comment or ID" '+
       'value="'+esc(f.rateSearch)+'" oninput="APP.filters.rateSearch=this.value;renderRates()"></div>'+
     '<div class="spacer"></div>'+
-    (isEditor()?'<button class="btn" onclick="openBulkRates()">Bulk update</button>':'')+
-    (isEditor()?'<button class="btn primary" onclick="openRateModal(null)">Add rate</button>':'')+
+    (canEditRates()?'<button class="btn" onclick="openBulkRates()">Bulk update</button>':'')+
+    (canEditRates()?'<button class="btn primary" onclick="openRateModal(null)">Add rate</button>':'')+
     '</div></div></div>'+
     '<div class="card"><div class="tablewrap"><table><thead><tr>'+
     '<th>#</th><th>Line</th><th>CC</th><th>Type</th><th>From</th><th>To</th>'+
@@ -626,7 +647,7 @@ function renderRates(){
       '<td>'+esc(r.From_Date)+'</td><td>'+esc(r.To_Date)+'</td>'+
       '<td class="right num">'+num(r.CPU)+'</td><td class="right num">'+num(r.QTY,2)+'</td>'+
       '<td class="comment-cell" title="'+esc(r.Comment)+'">'+esc(r.Comment)+'</td>'+
-      '<td class="rowacts">'+(isEditor()?
+      '<td class="rowacts">'+(canEditRates()?
         '<button class="btn link" onclick="openRateModal('+r.Rate_ID+')">Edit</button>'+
         '<button class="btn link danger" onclick="delRate('+r.Rate_ID+')">Delete</button>':'')+'</td>'+
       '</tr>').join('')
@@ -1041,7 +1062,7 @@ function openMixGroup(hlId, hlComponent){
     '<div class="lead" id="mixSum"></div>'+
     '<button class="btn" onclick="mixAddRow()">Add row</button>'+
     '<button class="btn" onclick="closeModal()">Cancel</button>'+
-    (isEditor()?'<button class="btn primary" id="mixSaveBtn" onclick="saveMixGroup()">Save group</button>':''),
+    (canEditMixes()?'<button class="btn primary" id="mixSaveBtn" onclick="saveMixGroup()">Save group</button>':''),
     true);
   renderMixEditor();
 }
@@ -1107,7 +1128,7 @@ function renderCCMix(){
     .sort((a,b)=>a.High_Level_ID-b.High_Level_ID || (a.From_Date<b.From_Date?-1:1));
   pane('ccmix').innerHTML=
     '<div class="card"><h2>Cold chain mix'+
-    (isEditor()?'<span class="act"><button class="btn sm primary" onclick="openCCModal(null)">Add range</button></span>':'')+
+    (canEditMixes()?'<span class="act"><button class="btn sm primary" onclick="openCCModal(null)">Add range</button></span>':'')+
     '</h2><div class="tablewrap"><table><thead><tr>'+
     '<th>#</th><th>High Level ID</th><th>From</th><th>To</th><th class="right">CC %</th><th>Comment</th><th></th>'+
     '</tr></thead><tbody>'+
@@ -1116,7 +1137,7 @@ function renderCCMix(){
       '<td>'+esc(m.From_Date)+'</td><td>'+esc(m.To_Date)+'</td>'+
       '<td class="right num">'+(Number(m.CC_Mix)*100).toFixed(1)+'%</td>'+
       '<td class="comment-cell" title="'+esc(m.Comment)+'">'+esc(m.Comment)+'</td>'+
-      '<td class="rowacts">'+(isEditor()?
+      '<td class="rowacts">'+(canEditMixes()?
         '<button class="btn link" onclick="openCCModal('+m.CC_Mix_ID+')">Edit</button>'+
         '<button class="btn link danger" onclick="delCC('+m.CC_Mix_ID+')">Delete</button>':'')+'</td></tr>').join('')
      :'<tr><td colspan="7" class="muted">No cold chain ranges yet.</td></tr>')+
@@ -1612,7 +1633,9 @@ function submitArea(id){
 
 /* =========================== history =========================== */
 function renderHistory(){
-  if(!isAdmin()){ pane('history').innerHTML='<div class="card"><div class="empty">Admins only.</div></div>'; return; }
+  if(!canViewAudit()){ pane('history').innerHTML='<div class="card"><div class="empty">'+
+    'Your access does not include the change history. Ask an Admin to set Can_View_Audit '+
+    'to Y for you on the Permissions tab.</div></div>'; return; }
   if(notReady('history')) return;
   const a=APP.audit||[];
   pane('history').innerHTML='<div class="card"><h2>Recent activity</h2>'+

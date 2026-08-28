@@ -5,9 +5,14 @@
  * Every change lands in Dimension_Amends as a JSON snapshot.
  ************************************************************/
  
-function _upsertDim_(sheetName, idHeader, obj, buildRow, summary) {
+/* areaId is the modelling area the row being written belongs to, or null where
+   the row IS an area (saveArea) or has no area column. requireEditDimsForArea_
+   keeps the Admin rank floor this function has always had and adds the
+   Can_Edit_Dims column on top — an Admin with that column set to N can still do
+   everything else an Admin can, and nothing here. */
+function _upsertDim_(sheetName, idHeader, obj, buildRow, summary, areaId) {
   prewarmForWrite_([sheetName, SHEET.DIM_AM]);
-  const perms = requireAdmin();
+  const perms = requireEditDimsForArea_(areaId);
   return withLock(() => {
     const sh = getSheet(sheetName);
     const data = getAllData(sheetName);
@@ -48,7 +53,7 @@ function saveHighLevelId(o) {
     row[c.Active] = o.active === 'N' ? 'N' : 'Y';
     row[c.Comment] = safeStr(o.comment);
     return row;
-  }, safeStr(o.brand) + ' ' + safeStr(o.geo) + ' ' + safeStr(o.wlDetail));
+  }, safeStr(o.brand) + ' ' + safeStr(o.geo) + ' ' + safeStr(o.wlDetail), Number(o.areaId) || 1);
 }
  
 /* {id?, areaId, highLevelComponent, component, active, comment} */
@@ -64,7 +69,7 @@ function saveComponent(o) {
     row[c.Active] = o.active === 'N' ? 'N' : 'Y';
     row[c.Comment] = safeStr(o.comment);
     return row;
-  }, safeStr(o.highLevelComponent) + ' / ' + safeStr(o.component));
+  }, safeStr(o.highLevelComponent) + ' / ' + safeStr(o.component), Number(o.areaId) || 1);
 }
  
 /* {id?, highLevelId, componentId, active, comment} */
@@ -88,7 +93,7 @@ function saveLine(o) {
     row[c.Active] = o.active === 'N' ? 'N' : 'Y';
     row[c.Comment] = safeStr(o.comment);
     return row;
-  }, 'HL ' + o.highLevelId + ' × comp ' + o.componentId);
+  }, 'HL ' + o.highLevelId + ' × comp ' + o.componentId, Number(hl.Area_ID) || 1);
 }
  
 /* {id?, areaName, outputMetricName, customerTypes, active} */
@@ -100,5 +105,5 @@ function saveArea(o) {
     row[c.Customer_Types] = safeStr(o.customerTypes) || 'New,Repeat,OTC';
     row[c.Active] = o.active === 'N' ? 'N' : 'Y';
     return row;
-  }, safeStr(o.areaName));
+  }, safeStr(o.areaName), o.id ? Number(o.id) : null);
 }

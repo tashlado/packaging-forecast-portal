@@ -3,9 +3,68 @@
  * Roles: Viewer < Editor < Admin. Areas: CSV of Area_IDs or ALL.
  * Every endpoint re-checks server-side; the UI hiding a button
  * is cosmetic only.
+ *
+ * On top of the rank sit four CAPABILITY columns on the
+ * Permissions tab. They exist because one rank was doing too
+ * many jobs at once: every Editor for an area could move rates,
+ * component mixes and the dimension tables, and only an Admin
+ * could read the change history. See CAPS below for the rules
+ * that keep adding them safe.
  ************************************************************/
 
 const ROLE_RANK = { 'Viewer': 1, 'Editor': 2, 'Admin': 3 };
+
+/**
+ * The capability columns, and what a BLANK cell means for each.
+ *
+ * Two rules make these safe to bolt onto a Permissions tab that already has
+ * people on it:
+ *
+ *   1. A capability can only ever take rights AWAY. Every gate still runs the
+ *      rank and area check it ran before, and the capability is an extra
+ *      condition on top. Ticking Can_Edit_Dims does not make a Viewer an Admin.
+ *
+ *   2. A blank cell means "whatever the rank already said". verifySetup() fills
+ *      a new header in but leaves the cells under it empty, so on the run after
+ *      these columns are added every existing row keeps behaving exactly as it
+ *      did. Nothing has to be backfilled before the deploy, and nothing breaks
+ *      if it never is.
+ *
+ * `dflt` is what a blank cell resolves to, as a function of the row's rank:
+ *
+ *   editRates / editMixes / editDims  → true. The rank gate in front of them is
+ *       what admits an Editor at all, so defaulting these on reproduces today's
+ *       behaviour exactly: an Editor for an area gets all three, until somebody
+ *       writes N in one of the cells.
+ *
+ *   viewAudit → Admin only. Defaulting it on would hand every Viewer the change
+ *       history on the deploy that adds the column, which is a widening nobody
+ *       asked for. Blank reproduces the Admin-only History tab of today; an
+ *       explicit Y is how a non-Admin is granted it, which is the whole point of
+ *       having the column.
+ *
+ * A cell is read as false only when it says so — N, NO, FALSE or 0. Anything
+ * else legible (Y, TRUE, a ticked checkbox) is true. A Google Sheets checkbox
+ * arrives as a real boolean, and an unticked one arrives as `false`, not blank,
+ * so ticking the column on and off works as expected once somebody uses it.
+ */
+const CAPS = {
+  editRates: { col: 'Can_Edit_Rates',  dflt: () => true,                what: 'edit rate card rows' },
+  editMixes: { col: 'Can_Edit_Mixes',  dflt: () => true,                what: 'edit component or cold chain mixes' },
+  editDims:  { col: 'Can_Edit_Dims',   dflt: () => true,                what: 'change the dimension tables' },
+  viewAudit: { col: 'Can_View_Audit',  dflt: rank => rank >= ROLE_RANK.Admin, what: 'view the change history' }
+};
+
+/* One capability cell → boolean. `false` is a value, not an absence: an unticked
+   Sheets checkbox is `false` and must not be mistaken for "not filled in". */
+function capOf_(cell, rank, spec) {
+  if (cell === '' || cell === null || cell === undefined) return spec.dflt(rank);
+  if (cell === true) return true;
+  if (cell === false) return false;
+  const s = safeStr(cell).toUpperCase();
+  if (s === '') return spec.dflt(rank);
+  return ['N', 'NO', 'FALSE', '0'].indexOf(s) < 0;
+}
 
 let _userPermsCache_ = null;
 function getUserPermissions() {
@@ -19,20 +78,36 @@ function getUserPermissions() {
     if (safeStr(data[i][c.Email]).toLowerCase() === email) { found = data[i]; break; }
   }
   if (!found) {
-    _userPermsCache_ = { email: email, portalName: email, role: 'None', rank: 0, areas: [], allAreas: false };
+    _userPermsCache_ = { email: email, portalName: email, role: 'None', rank: 0,
+                         areas: [], allAreas: false, caps: noCaps_() };
     return _userPermsCache_;
   }
   const role = safeStr(found[c.Role]);
+  const rank = ROLE_RANK[role] || 0;
   const areasRaw = safeStr(found[c.Areas]).toUpperCase();
+  const caps = {};
+  Object.keys(CAPS).forEach(k => {
+    /* A tab that predates the columns has no index for them at all, which reads
+       the same as a blank cell — the default for the rank. */
+    const idx = c[CAPS[k].col];
+    caps[k] = capOf_(idx === undefined ? '' : found[idx], rank, CAPS[k]);
+  });
   _userPermsCache_ = {
     email: email,
     portalName: safeStr(found[c.Portal_Name]) || email,
     role: role,
-    rank: ROLE_RANK[role] || 0,
+    rank: rank,
+    caps: caps,
     allAreas: areasRaw === 'ALL',
     areas: areasRaw === 'ALL' ? [] : areasRaw.split(',').map(s => parseInt(s, 10)).filter(n => !isNaN(n))
   };
   return _userPermsCache_;
+}
+
+function noCaps_() {
+  const o = {};
+  Object.keys(CAPS).forEach(k => o[k] = false);
+  return o;
 }
 
 function canAccessArea_(perms, areaId) {
@@ -56,4 +131,57 @@ function requireEditorForArea_(areaId) {
     throw new Error('You do not have edit access to this modelling area.');
   }
   return perms;
+}
+
+/* ---------------- capability gates ----------------
+ *
+ * Each is the rank-and-area check the call site already had, plus one column.
+ * Kept thin on purpose: the interesting decision is which capability a call site
+ * needs, and that belongs at the call site, not buried in a branch here.
+ */
+function requireCapability_(perms, cap) {
+  const spec = CAPS[cap];
+  if (!spec) throw new Error('Unknown capability "' + cap + '".');
+  if (perms.caps && perms.caps[cap]) return perms;
+  throw new Error('Your access does not let you ' + spec.what + '. ' +
+    'The ' + spec.col + ' column on the Permissions tab is set to N for ' + perms.email +
+    ' — ask an Admin to change it.');
+}
+
+function requireEditRatesForArea_(areaId) {
+  return requireCapability_(requireEditorForArea_(areaId), 'editRates');
+}
+function requireEditMixesForArea_(areaId) {
+  return requireCapability_(requireEditorForArea_(areaId), 'editMixes');
+}
+/**
+ * Dimension edits.
+ *
+ * The rank floor here is ADMIN, not Editor, because that is what dimensions.js
+ * has always required — the dimension tables define what every area is made of,
+ * and _upsertDim_ has never been open to an area Editor. Capability columns
+ * narrow, so this one narrows Admin: it cannot be the route by which an Editor
+ * gains dimension rights they did not have yesterday.
+ *
+ * areaId is still checked for the sake of the shape, and because an Admin
+ * scoped to specific areas is a configuration this portal permits even if
+ * requireEditorForArea_ waves Admins through today.
+ */
+function requireEditDimsForArea_(areaId) {
+  const perms = requireAdmin();
+  if (perms.rank < ROLE_RANK.Admin && !canAccessArea_(perms, areaId)) {
+    throw new Error('You do not have edit access to this modelling area.');
+  }
+  return requireCapability_(perms, 'editDims');
+}
+
+/**
+ * Read the change history.
+ *
+ * Viewer rank plus the capability, so history can be granted to somebody who
+ * should not be made an Admin — which is the reason the column exists. Blank
+ * still resolves to Admin-only, so nobody gains sight of it by this deploy.
+ */
+function requireViewAudit_() {
+  return requireCapability_(requireViewer(), 'viewAudit');
 }

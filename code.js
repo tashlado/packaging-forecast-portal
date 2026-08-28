@@ -2,6 +2,11 @@
  * Code.gs — entry point and the two-phase load
  ************************************************************/
 
+/* How much of Audit_Log the History tab gets in the phase-2 payload. A bulk
+   change writes about five rows per rate, so this is a few dozen bulk batches
+   rather than a few hundred edits — hence the batch grouping on the client. */
+const AUDIT_PAGE_ROWS = 300;
+
 function doGet() {
   return HtmlService.createTemplateFromFile('index')
     .evaluate()
@@ -21,7 +26,11 @@ function initApp() {
   }
   return {
     authorised: true,
-    user: { email: perms.email, portalName: perms.portalName, role: perms.role, allAreas: perms.allAreas, areas: perms.areas },
+    user: { email: perms.email, portalName: perms.portalName, role: perms.role,
+            allAreas: perms.allAreas, areas: perms.areas,
+            /* The capability columns, so the client can hide what the server would
+               refuse anyway. Hiding a control is cosmetic — every endpoint re-checks. */
+            caps: perms.caps },
     ref: loadReferenceData_(),
     config: publicConfig_()
   };
@@ -98,9 +107,12 @@ function loadAllAppData() {
     completeness: computeCompleteness_(),
     config:   publicConfig_()
   };
-  if (perms.rank >= ROLE_RANK.Admin) {
+  /* Can_View_Audit rather than Admin rank: the history is a read, and somebody
+     can now be given sight of it without being made an Admin. A blank column
+     still resolves to Admin-only, so this deploy widens nothing by itself. */
+  if (perms.caps && perms.caps.viewAudit) {
     const audit = tableToObjects_(SHEET.AUDIT);
-    payload.audit = audit.slice(Math.max(0, audit.length - 300)).reverse();
+    payload.audit = audit.slice(Math.max(0, audit.length - AUDIT_PAGE_ROWS)).reverse();
   }
   return payload;
 }

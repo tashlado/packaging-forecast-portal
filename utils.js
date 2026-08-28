@@ -39,7 +39,12 @@ const HEADERS = {
   'Cold_Chain_Mix':      ['CC_Mix_ID','High_Level_ID','From_Date','To_Date','CC_Mix','Comment','Active','Updated_At','Updated_By'],
   'FX_Rates':            ['Month','GBP','USD','EUR','CAD'],
   'Config':              ['Key','Value'],
-  'Permissions':         ['Email','Portal_Name','Role','Areas','Active'],
+  /* Can_Edit_Rates / Can_Edit_Mixes / Can_Edit_Dims / Can_View_Audit are capability
+     columns. They NARROW what a rank already allows and never widen it, and a blank
+     cell means "whatever the rank said" — which is what makes them safe to append to
+     a live Permissions tab. See capOf_ in auth.js. */
+  'Permissions':         ['Email','Portal_Name','Role','Areas','Active',
+                          'Can_Edit_Rates','Can_Edit_Mixes','Can_Edit_Dims','Can_View_Audit'],
   'Audit_Log':           ['Log_ID','Timestamp','Email','Action','Target_Table','Target_ID','Summary','Field','Old_Value','New_Value'],
   'Modelling':           ['Modelling_ID','High_Level_ID','Month','CC_Mix_Applied','Component_Mix_Applied','New','Repeat','OTC'],
   'Output':              ['High_Level_ID','Month','Customer_Type','Brand','Geo','Treatment_Type','WL_Detail','Currency','Cost_Local','FX_to_GBP','Cost_GBP','Compare_Snapshot','Snapshot_Cost_Local','Variance_Local'],

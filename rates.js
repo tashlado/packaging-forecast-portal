@@ -23,7 +23,7 @@ function areaTypesForLine_(modellingId) {
 function saveRate(rate) {
   prewarmForWrite_([SHEET.RATES, SHEET.RATES_AM]);
   const ctx = areaTypesForLine_(rate.modellingId);
-  const perms = requireEditorForArea_(ctx.areaId);
+  const perms = requireEditRatesForArea_(ctx.areaId);
 
   const from = normDate(rate.fromDate), to = normDate(rate.toDate);
   if (!from || !to) throw new Error('From and To dates are required (yyyy-mm-dd).');
@@ -107,7 +107,7 @@ function deleteRate(rateId) {
     for (let i = 1; i < data.length; i++) {
       if (String(data[i][c.Rate_ID]) !== String(rateId)) continue;
       const ctx = areaTypesForLine_(data[i][c.Modelling_ID]);
-      const perms = requireEditorForArea_(ctx.areaId);
+      const perms = requireEditRatesForArea_(ctx.areaId);
       sh.getRange(i + 1, c.Active + 1).setValue('N');
       sh.getRange(i + 1, c.Updated_At + 1).setValue(new Date());
       sh.getRange(i + 1, c.Updated_By + 1).setValue(perms.email);

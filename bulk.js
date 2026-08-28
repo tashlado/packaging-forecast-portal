@@ -327,7 +327,11 @@ function bulkBatchRef_(when) {
  */
 function bulkUpdateRates(p) {
   prewarmForWrite_([SHEET.RATES, SHEET.RATES_AM]);
-  const perms = requireEditor();
+  /* The capability, not the per-area gate: which areas a row belongs to is
+     decided per row further down (planBulkRateChange_ counts them as
+     skippedNoScope, applyBulkRateChange_ re-checks them inside the lock), and
+     Can_Edit_Rates is a property of the person rather than of any one row. */
+  const perms = requireCapability_(requireEditor(), 'editRates');
   const plan = planBulkRateChange_(p, perms);
 
   if (p.preview !== false) {
