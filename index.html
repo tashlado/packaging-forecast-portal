@@ -121,6 +121,16 @@ tr.frow select,tr.frow input{padding:2px 5px;font-size:11px;border-radius:4px;mi
 tr.frow .rng{display:flex;gap:3px}
 tr.frow .rng input{width:50%}
 
+/* A batch's child rows in History: indented and quieter than the heading they
+   belong to, so a run of forty reads as detail rather than as forty events. */
+tbody tr.sub td{background:var(--bg);font-size:12px}
+tbody tr.sub td:first-child{padding-left:22px}
+/* The disclosure triangle, shared with the .checks dropdown rather than given a
+   second name for the same thing — one name to one component. This is the base;
+   .checks .chev adds the rotation, because that control turns its arrow while
+   History swaps the character. */
+.chev{font-size:10px;color:var(--ink-3)}
+
 /* ---- controls ---- */
 .btn{padding:7px 13px;border-radius:var(--radius);border:1px solid var(--line-2);
      background:var(--surface);font-size:13px;color:var(--ink-2)}
@@ -212,7 +222,7 @@ input.bad{border-color:var(--err);background:#FFF6F7}
 .checks .cksum:focus-visible{outline:2px solid var(--brand);outline-offset:-2px}
 .checks.open .cksum{border-color:var(--brand)}
 .checks .cnt{margin-left:auto;font-size:12px;color:var(--ink-3)}
-.checks .chev{font-size:10px;color:var(--ink-3);transition:transform .12s}
+.checks .chev{transition:transform .12s}
 .checks.open .chev{transform:rotate(180deg)}
 .checks .ckpanel{display:none;position:fixed;z-index:110;background:var(--surface);
        border:1px solid var(--line);border-radius:8px;
@@ -2423,27 +2433,153 @@ function renderRecordHistory(){
 }
 
 /* =========================== history =========================== */
+/* A bulk rate change writes about five audit rows per rate — close, supersede,
+   and a row per field each — every one carrying its BULK-<timestamp> reference
+   as the first token of Summary, with the batch summary row written last so it
+   lands newest. A single change of 60 rates therefore fills the whole 300-row
+   window with what is, to a reader, one thing somebody did.
+
+   So they are collected back together under that reference, shown as one line
+   with a count, and expanded on demand. The reference is the hook the write
+   path deliberately left. */
+const BULK_REF = /^(BULK-\d{8}-\d{6})/;
+function bulkRefOf(row){
+  const m = BULK_REF.exec(String(row.Summary||''));
+  return m ? m[1] : (BULK_REF.test(String(row.Target_ID||'')) ? String(row.Target_ID) : '');
+}
+/* The reference is already printed as the group's own heading, so repeating it
+   on all 300 child rows is noise. */
+function summaryAfterRef(row){
+  return String(row.Summary||'').replace(BULK_REF, '').replace(/^\s*·\s*/, '').trim();
+}
+
+/**
+ * Audit rows, in order, with batches collapsed into one entry each.
+ *
+ * Order is preserved rather than re-sorted: a batch takes the position of its
+ * FIRST row in the list, which — since the list is newest first and the batch
+ * summary is written last — is the summary row. So a batch appears exactly
+ * where the reader would expect the action to have happened.
+ */
+function historyGroups(rows){
+  const out=[], byRef={};
+  rows.forEach(r=>{
+    const ref=bulkRefOf(r);
+    if(!ref){ out.push({batch:false, row:r}); return; }
+    if(!byRef[ref]){
+      byRef[ref]={batch:true, ref:ref, rows:[], when:r.Timestamp, who:r.Email, summary:''};
+      out.push(byRef[ref]);
+    }
+    const g=byRef[ref];
+    g.rows.push(r);
+    /* The batch summary row is the one with no Field: it is the sentence that
+       says what the whole action was, and it is what the group heading shows. */
+    if(!String(r.Field||'') && !g.summary) g.summary=summaryAfterRef(r);
+  });
+  return out;
+}
+
+let HISTOPEN={};
+function historyToggle(ref){ HISTOPEN[ref]=!HISTOPEN[ref]; renderHistory(); }
+function historyExpandAll(open){
+  HISTOPEN={};
+  if(open) historyGroups(historyRows()).forEach(g=>{ if(g.batch) HISTOPEN[g.ref]=true; });
+  renderHistory();
+}
+/* One search box rather than a filter per column: the interesting question here
+   is almost always a name, a rate id or an action, and all three live in
+   different columns of the same row. */
+function historyRows(){
+  const q=String(APP.filters.histSearch||'').toLowerCase();
+  const rows=APP.audit||[];
+  if(!q) return rows;
+  return rows.filter(r=>
+    [r.Email,r.Action,r.Target_Table,r.Target_ID,r.Field,r.Old_Value,r.New_Value,r.Summary]
+      .join(' ').toLowerCase().indexOf(q)>=0);
+}
+
 function renderHistory(){
   if(!canViewAudit()){ pane('history').innerHTML='<div class="card"><div class="empty">'+
     'Your access does not include the change history. Ask an Admin to set Can_View_Audit '+
     'to Y for you on the Permissions tab.</div></div>'; return; }
   if(notReady('history')) return;
-  const a=APP.audit||[];
-  pane('history').innerHTML='<div class="card"><h2>Recent activity</h2>'+
-    '<div class="note small muted" style="padding:10px 16px 0">Last '+a.length+' rows. A save '+
-      'writes one row per field it changed, so one edit can be several lines. Full row-level '+
-      'snapshots live in the *_Amends tabs of the Google Sheet.</div>'+
-    '<div class="tablewrap"><table><thead><tr>'+
+  const all=APP.audit||[];
+  const rows=historyRows();
+  const groups=historyGroups(rows);
+  const batches=groups.filter(g=>g.batch).length;
+  const COLS=9;
+
+  const cell=r=>'<td>'+esc(String(r.Timestamp))+'</td><td class="small">'+esc(r.Email)+'</td>'+
+    '<td class="small">'+esc(r.Action)+'</td><td class="small muted">'+esc(r.Target_Table)+'</td>'+
+    '<td class="num">'+esc(r.Target_ID)+'</td>'+
+    '<td class="small">'+esc(r.Field)+'</td>'+
+    /* Old and New side by side is the whole point of the per-field logging: a
+       blank on a create is different from an empty string it was changed to. */
+    '<td class="num">'+(String(r.Old_Value||'')===''?'<span class="muted">&mdash;</span>':esc(r.Old_Value))+'</td>'+
+    '<td class="num">'+(String(r.New_Value||'')===''?'<span class="muted">&mdash;</span>':esc(r.New_Value))+'</td>'+
+    '<td class="comment-cell" title="'+esc(r.Summary)+'">'+esc(r.Summary)+'</td>';
+
+  let body='';
+  if(!groups.length){
+    body='<tr><td colspan="'+COLS+'" class="muted">'+
+      (all.length?'Nothing matches that search.':'No activity logged yet.')+'</td></tr>';
+  } else groups.forEach(g=>{
+    if(!g.batch){ body+='<tr>'+cell(g.row)+'</tr>'; return; }
+    const open=!!HISTOPEN[g.ref];
+    const fields=g.rows.filter(r=>String(r.Field||'')).length;
+    body+='<tr class="click" onclick="historyToggle(\''+esc(g.ref)+'\')">'+
+      '<td>'+esc(String(g.when))+'</td><td class="small">'+esc(g.who)+'</td>'+
+      '<td colspan="'+(COLS-2)+'">'+
+        '<span class="chev">'+(open?'&#9662;':'&#9656;')+'</span> '+
+        '<span class="pill">'+esc(g.ref)+'</span> '+
+        esc(g.summary||'bulk change')+
+        ' <span class="muted small">&mdash; '+g.rows.length+' log row(s)'+
+        (fields?', '+fields+' field change(s)':'')+'</span>'+
+      '</td></tr>';
+    if(!open) return;
+    g.rows.forEach(r=>{
+      /* The group heading already carries the reference and the sentence, so a
+         child row shows what is left: which field, on which record, moved. */
+      body+='<tr class="sub"><td class="small muted">'+esc(String(r.Timestamp))+'</td>'+
+        '<td></td><td class="small">'+esc(r.Action)+'</td>'+
+        '<td class="small muted">'+esc(r.Target_Table)+'</td>'+
+        '<td class="num">'+esc(r.Target_ID)+'</td>'+
+        '<td class="small">'+esc(r.Field)+'</td>'+
+        '<td class="num">'+(String(r.Old_Value||'')===''?'<span class="muted">&mdash;</span>':esc(r.Old_Value))+'</td>'+
+        '<td class="num">'+(String(r.New_Value||'')===''?'<span class="muted">&mdash;</span>':esc(r.New_Value))+'</td>'+
+        '<td class="comment-cell small muted" title="'+esc(r.Summary)+'">'+
+          esc(summaryAfterRef(r))+'</td></tr>';
+    });
+  });
+
+  pane('history').innerHTML=
+    '<div class="card"><div class="body"><div class="row tight">'+
+    '<div class="field filter"><label>Search</label>'+
+      '<input type="text" data-tf="hist|search" placeholder="Who, action, field or value" '+
+      'value="'+esc(APP.filters.histSearch||'')+'" oninput="historySearch(this.value)"></div>'+
+    '<div class="spacer"></div>'+
+    '<span class="small muted">'+rows.length+' of '+all.length+' log row(s)'+
+      (batches?' &middot; '+batches+' bulk batch'+(batches===1?'':'es'):'')+'</span>'+
+    (batches?'<button class="btn sm" onclick="historyExpandAll(true)">Expand all</button>'+
+             '<button class="btn sm" onclick="historyExpandAll(false)">Collapse</button>':'')+
+    '</div>'+
+    '<div class="hint">A save writes one row per field it changed, so one edit is often '+
+      'several lines. Rows sharing a <b>BULK-</b> reference were one action, not separate '+
+      'edits, and are collected under it — click to open. Full row-level snapshots live in '+
+      'the *_Amends tabs, and the History button beside a rate or a mix reads them back.</div>'+
+    '</div></div>'+
+    '<div class="card"><div class="tablewrap"><table><thead><tr>'+
     '<th>When</th><th>Who</th><th>Action</th><th>Table</th><th>Target</th><th>Field</th>'+
-    '<th>Was</th><th>Became</th><th>Summary</th></tr></thead><tbody>'+
-    (a.length?a.map(r=>'<tr><td>'+esc(String(r.Timestamp))+'</td><td>'+esc(r.Email)+'</td>'+
-      '<td>'+esc(r.Action)+'</td><td>'+esc(r.Target_Table)+'</td><td>'+esc(r.Target_ID)+'</td>'+
-      '<td>'+esc(r.Field)+'</td>'+
-      '<td class="num">'+esc(r.Old_Value)+'</td><td class="num">'+esc(r.New_Value)+'</td>'+
-      '<td class="comment-cell" title="'+esc(r.Summary)+'">'+esc(r.Summary)+'</td></tr>').join('')
-     :'<tr><td colspan="9" class="muted">No activity logged yet.</td></tr>')+
+    '<th>Was</th><th>Became</th><th>Summary</th></tr></thead><tbody>'+body+
     '</tbody></table></div></div>';
 }
+/* Re-rendered through tRerender so the caret stays in the search box, the same
+   way the column filters do. */
+function historySearch(val){
+  APP.filters.histSearch=val;
+  tRerender('history');
+}
+TBL_RENDER.history = function(){ renderHistory(); };
 </script>
 </body>
 </html>
